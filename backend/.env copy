@@ -1,0 +1,5 @@
+PORT=5000
+DATABASE_URL=mysql://root:@127.0.0.1:3306/fb_chat_ai
+JWT_SECRET=fb-chatbot-super-secret-key-12345
+GEMINI_API_KEY=
+FB_VERIFY_TOKEN=my-chatbot-verify-token-12345
