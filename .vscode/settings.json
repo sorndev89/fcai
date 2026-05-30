@@ -1,0 +1,25 @@
+{
+  // Exclude Nuxt/Nitro cache directories from file watcher
+  // to avoid Windows EPERM file-locking during builds.
+  "files.watcherExclude": {
+    "**/node_modules/.cache/**": true,
+    "**/.nuxt/**": true,
+    "**/.output-dist/**": true,
+    "**/.nitro-cache/**": true,
+    "**/.vite-cache/**": true
+  },
+  // Exclude from file search
+  "search.exclude": {
+    "**/node_modules/.cache/**": true,
+    "**/.nuxt/**": true,
+    "**/.output-dist/**": true,
+    "**/.nitro-cache/**": true
+  },
+  // Exclude from file explorer
+  "files.exclude": {
+    "**/.nuxt": true,
+    "**/.output-dist": true,
+    "**/.nitro-cache": true,
+    "**/.vite-cache": true
+  }
+}
