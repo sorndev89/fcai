@@ -1,11 +1,18 @@
 import { Router } from 'express';
 import { db } from '../config/db';
 import { customers, chatLogs, pages } from '../db/schema';
-import { eq, and, asc } from 'drizzle-orm';
+import { eq, and, asc, desc } from 'drizzle-orm';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 import { extractOrderSummary } from '../services/gemini';
 
 const router = Router();
+
+router.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
 
 // Apply auth middleware to all routes
 router.use(authenticateToken as any);
@@ -14,6 +21,17 @@ router.use(authenticateToken as any);
 async function verifyPageOwnership(pageId: string, userId: string): Promise<boolean> {
   const result = await db.select().from(pages).where(and(eq(pages.id, pageId), eq(pages.userId, userId))).limit(1);
   return result.length > 0;
+}
+
+function normalizeCustomerRow(customer: any) {
+  return {
+    ...customer,
+    profilePic: customer.profilePic || null,
+    phoneNumber: customer.phoneNumber || null,
+    email: customer.email || null,
+    address: customer.address || null,
+    notes: customer.notes || null,
+  };
 }
 
 // Get all customers for a connected page
@@ -27,8 +45,13 @@ router.get('/page/:pageId', async (req: AuthenticatedRequest, res) => {
       return res.status(403).json({ error: 'Unauthorized access to this page' });
     }
 
-    const pageCustomers = await db.select().from(customers).where(eq(customers.pageId, pageId));
-    res.json(pageCustomers);
+    const pageCustomers = await db
+      .select()
+      .from(customers)
+      .where(eq(customers.pageId, pageId))
+      .orderBy(desc(customers.createdAt), asc(customers.fullName));
+
+    res.status(200).json(pageCustomers.map(normalizeCustomerRow));
   } catch (error) {
     console.error('Get customers error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -54,7 +77,7 @@ router.get('/:id', async (req: AuthenticatedRequest, res) => {
       return res.status(403).json({ error: 'Unauthorized access to this customer data' });
     }
 
-    res.json(customer);
+    res.status(200).json(normalizeCustomerRow(customer));
   } catch (error) {
     console.error('Get customer by id error:', error);
     res.status(500).json({ error: 'Internal server error' });

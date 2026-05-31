@@ -115,6 +115,7 @@ async function loadPageDetails() {
     // Load page's customers
     const custData = await $fetch<any[]>(`${apiUrl}/api/customers/page/${pageId}`, {
       headers: headers.value,
+      cache: 'no-store',
     });
     customers.value = custData;
   } catch (err: any) {

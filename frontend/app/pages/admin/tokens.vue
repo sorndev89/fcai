@@ -120,7 +120,10 @@ async function loadData() {
     bundles.value = Array.isArray(bundlesRes) ? bundlesRes : [];
     tenants.value = Array.isArray(tenantsRes) ? tenantsRes : [];
     topupHistory.value = Array.isArray(paymentsRes?.data)
-      ? paymentsRes.data.filter((pay: any) => pay.paymentType === 'token_topup')
+      ? paymentsRes.data.filter((pay: any) => {
+          const kind = String(pay.paymentKind || pay.paymentType || '').toLowerCase();
+          return kind === 'token_topup' || Number(pay.tokenAmount || 0) > 0;
+        })
       : [];
 
     if (!selectedUserId.value && tenants.value.length > 0) {

@@ -86,6 +86,7 @@ async function loadCustomerDetails() {
   try {
     const data = await $fetch<any>(`${apiUrl}/api/customers/${customerId}`, {
       headers: headers.value,
+      cache: 'no-store',
     });
     customer.value = data;
     phone.value = data.phoneNumber || '';
@@ -96,6 +97,7 @@ async function loadCustomerDetails() {
     // Load actual DB chat history
     const logs = await $fetch<any[]>(`${apiUrl}/api/customers/${customerId}/chats`, {
       headers: headers.value,
+      cache: 'no-store',
     });
     
     // Flat map: each chatLog record contains a prompt (messageIn) and a reply (messageOut)
@@ -474,4 +476,3 @@ onMounted(() => {
     ບໍ່ພົບຂໍ້ມູນລູກຄ້າ
   </div>
 </template>
-

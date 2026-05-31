@@ -7,10 +7,155 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import fs from 'fs';
 import path from 'path';
+import { poolConnection } from '../config/db';
 import { ensureTokenBundlesReady, getAllTokenBundles } from '../utils/token-bundles';
+import { ensureUploadsDir, toPublicUploadPath } from '../utils/uploads';
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'fb-chatbot-super-secret-key-12345';
+
+let bonusTokensColumnPromise: Promise<boolean> | null = null;
+let userPackageColumnPromise: Promise<boolean> | null = null;
+
+async function hasBonusTokensColumn() {
+  if (!bonusTokensColumnPromise) {
+    bonusTokensColumnPromise = poolConnection
+      .query(
+        `
+          SELECT COUNT(*) AS count
+          FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'users'
+            AND COLUMN_NAME = 'bonus_tokens'
+        `
+      )
+      .then(([rows]: any) => Number(rows?.[0]?.count || 0) > 0)
+      .catch((error) => {
+        bonusTokensColumnPromise = null;
+        throw error;
+      });
+  }
+
+  return bonusTokensColumnPromise;
+}
+
+async function hasUserPackageColumn() {
+  if (!userPackageColumnPromise) {
+    userPackageColumnPromise = poolConnection
+      .query(
+        `
+          SELECT COUNT(*) AS count
+          FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'users'
+            AND COLUMN_NAME = 'package_id'
+        `
+      )
+      .then(([rows]: any) => Number(rows?.[0]?.count || 0) > 0)
+      .catch((error) => {
+        userPackageColumnPromise = null;
+        throw error;
+      });
+  }
+
+  return userPackageColumnPromise;
+}
+
+let paymentsColumnsPromise: Promise<Record<string, boolean>> | null = null;
+
+async function getPaymentsColumnFlags() {
+  if (!paymentsColumnsPromise) {
+    paymentsColumnsPromise = poolConnection
+      .query(
+        `
+          SELECT COLUMN_NAME AS columnName
+          FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'payments'
+        `
+      )
+      .then(([rows]: any) => {
+        const names = new Set((rows || []).map((row: any) => String(row.columnName)));
+        return {
+          paymentType: names.has('payment_type'),
+          tokenAmount: names.has('token_amount'),
+          recordedBy: names.has('recorded_by'),
+          paymentDate: names.has('payment_date'),
+          slipUrl: names.has('slip_url'),
+        };
+      })
+      .catch((error) => {
+        paymentsColumnsPromise = null;
+        throw error;
+      });
+  }
+
+  return paymentsColumnsPromise;
+}
+
+function summarizeError(error: any) {
+  return {
+    code: error?.code || error?.errno || error?.name || 'UNKNOWN_ERROR',
+    message: error?.sqlMessage || error?.message || 'Unknown error',
+    sqlState: error?.sqlState,
+  };
+}
+
+function adminPaymentErrorResponse(action: string, error: any) {
+  const summary = summarizeError(error);
+  return {
+    error: `${action} ບໍ່ສຳເລັດ: ${summary.message}`,
+    code: summary.code,
+    sqlState: summary.sqlState,
+  };
+}
+
+async function getPaymentByIdRaw(id: string) {
+  const paymentCols = await getPaymentsColumnFlags();
+  const selectColumns = [
+    '`id`',
+    '`user_id` AS `userId`',
+    '`package_id` AS `packageId`',
+    '`amount`',
+    '`status`',
+    '`created_at` AS `createdAt`',
+  ];
+
+  if (paymentCols.paymentType) selectColumns.push('`payment_type` AS `paymentType`');
+  if (paymentCols.tokenAmount) selectColumns.push('`token_amount` AS `tokenAmount`');
+  if (paymentCols.recordedBy) selectColumns.push('`recorded_by` AS `recordedBy`');
+  if (paymentCols.paymentDate) selectColumns.push('`payment_date` AS `paymentDate`');
+  if (paymentCols.slipUrl) selectColumns.push('`slip_url` AS `slipUrl`');
+
+  const [rows]: any = await poolConnection.execute(
+    `SELECT ${selectColumns.join(', ')} FROM \`payments\` WHERE \`id\` = ? LIMIT 1`,
+    [id]
+  );
+
+  return rows?.[0] || null;
+}
+
+async function updatePaymentStatusRaw(id: string, status: 'paid' | 'rejected', adminId: string | null) {
+  const paymentCols = await getPaymentsColumnFlags();
+  const assignments = ['`status` = ?'];
+  const values: any[] = [status];
+
+  if (paymentCols.paymentDate && status === 'paid') {
+    assignments.push('`payment_date` = ?');
+    values.push(new Date());
+  }
+
+  if (paymentCols.recordedBy) {
+    assignments.push('`recorded_by` = ?');
+    values.push(adminId);
+  }
+
+  values.push(id);
+  await poolConnection.execute(
+    `UPDATE \`payments\` SET ${assignments.join(', ')} WHERE \`id\` = ?`,
+    values
+  );
+}
 
 interface AdminRequest extends Request {
   user?: {
@@ -61,6 +206,8 @@ async function validateActiveAiConfigId(aiConfigId?: string | null) {
 // 1. Fetch Tenants list (excludes the admin user itself)
 router.get('/tenants', requireAdmin as any, async (req: any, res: Response) => {
   try {
+    const includeBonusTokens = await hasBonusTokensColumn();
+    const includePackageId = await hasUserPackageColumn();
     const tenants = await db
       .select({
         id: users.id,
@@ -68,13 +215,17 @@ router.get('/tenants', requireAdmin as any, async (req: any, res: Response) => {
         email: users.email,
         role: users.role,
         status: users.status,
-        packageId: users.packageId,
-        bonusTokens: users.bonusTokens,
+        ...(includePackageId ? { packageId: users.packageId } : {}),
+        ...(includeBonusTokens ? { bonusTokens: users.bonusTokens } : {}),
         createdAt: users.createdAt,
       })
       .from(users)
       .where(ne(users.role, 'admin'));
-    res.json(tenants);
+    const normalized = tenants.map((tenant: any) => ({
+      ...tenant,
+      bonusTokens: includeBonusTokens ? Number(tenant.bonusTokens || 0) : 0,
+    }));
+    res.json(normalized);
   } catch (error) {
     console.error('Fetch tenants error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -85,6 +236,7 @@ router.get('/tenants', requireAdmin as any, async (req: any, res: Response) => {
 router.post('/tenants', requireAdmin as any, async (req: any, res: Response) => {
   try {
     const { name, email, password, packageId, status } = req.body;
+    const includePackageId = await hasUserPackageColumn();
 
     if (!name || !email || !password || !packageId) {
       return res.status(400).json({ error: 'ກະລຸນາປ້ອນຂໍ້ມູນໃຫ້ຄົບຖ້ວນ' });
@@ -112,9 +264,9 @@ router.post('/tenants', requireAdmin as any, async (req: any, res: Response) => 
       name,
       email,
       password: hashedPassword,
-      packageId,
       status: status || 'approved',
       role: 'tenant',
+      ...(includePackageId ? { packageId } : {}),
     });
 
     res.status(201).json({ message: 'ລົງທະບຽນລູກຄ້າໃໝ່ສຳເລັດ', tenantId });
@@ -129,6 +281,7 @@ router.put('/tenants/:id', requireAdmin as any, async (req: any, res: Response) 
   try {
     const { id } = req.params;
     const { name, email, password, packageId, status } = req.body;
+    const includePackageId = await hasUserPackageColumn();
 
     // Check if user exists
     const userResult = await db.select().from(users).where(eq(users.id, id)).limit(1);
@@ -147,6 +300,9 @@ router.put('/tenants/:id', requireAdmin as any, async (req: any, res: Response) 
       updateData.email = email;
     }
     if (packageId !== undefined) {
+      if (!includePackageId) {
+        return res.status(400).json({ error: 'Server ນີ້ຍັງບໍ່ຮອງຮັບ package assignment' });
+      }
       // Verify package
       const targetPkg = await db.select().from(packages).where(eq(packages.id, packageId)).limit(1);
       if (targetPkg.length === 0) {
@@ -474,6 +630,11 @@ router.post('/users/:id/bonus-tokens', requireAdmin as any, async (req: any, res
       return res.status(400).json({ error: 'Token amount must be greater than zero' });
     }
 
+    const includeBonusTokens = await hasBonusTokensColumn();
+    if (!includeBonusTokens) {
+      return res.status(503).json({ error: 'bonus_tokens column is not available yet. Please run migrations on this server.' });
+    }
+
     const userResult = await db.select().from(users).where(eq(users.id, id)).limit(1);
     if (userResult.length === 0) {
       return res.status(404).json({ error: 'User not found' });
@@ -515,6 +676,12 @@ router.get('/payments/pending-count', requireAdmin as any, async (req: any, res:
 // 5. Fetch Payments logs
 router.get('/payments', requireAdmin as any, async (req: any, res: Response) => {
   try {
+    const paymentCols = await getPaymentsColumnFlags();
+    const tokenBundles = await getAllTokenBundles();
+    const bundleByPrice = new Map<number, any>();
+    for (const bundle of tokenBundles) {
+      bundleByPrice.set(Number(bundle.price), bundle);
+    }
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
     const offset = (page - 1) * limit;
@@ -541,7 +708,21 @@ router.get('/payments', requireAdmin as any, async (req: any, res: Response) => 
     const total = Number(totalResult[0]?.total || 0);
 
     // Fetch paginated payments, newest first
-    const selectQuery = db.select().from(payments);
+    const paymentSelect: Record<string, any> = {
+      id: payments.id,
+      userId: payments.userId,
+      packageId: payments.packageId,
+      amount: payments.amount,
+      status: payments.status,
+      createdAt: payments.createdAt,
+    };
+    if (paymentCols.paymentType) paymentSelect.paymentType = payments.paymentType;
+    if (paymentCols.tokenAmount) paymentSelect.tokenAmount = payments.tokenAmount;
+    if (paymentCols.recordedBy) paymentSelect.recordedBy = payments.recordedBy;
+    if (paymentCols.paymentDate) paymentSelect.paymentDate = payments.paymentDate;
+    if (paymentCols.slipUrl) paymentSelect.slipUrl = payments.slipUrl;
+
+    const selectQuery = db.select(paymentSelect).from(payments);
     if (whereClause) {
       selectQuery.where(whereClause);
     }
@@ -553,17 +734,34 @@ router.get('/payments', requireAdmin as any, async (req: any, res: Response) => 
     // Enrich with user name & package name
     const enriched = await Promise.all(
       paymentsList.map(async (pay) => {
+        const amountNumber = Number(pay.amount);
+        const inferredBundle = bundleByPrice.get(amountNumber);
+        const inferredPaymentType = paymentCols.paymentType
+          ? pay.paymentType
+          : inferredBundle
+            ? 'token_topup'
+            : 'package';
+        const inferredTokenAmount = paymentCols.tokenAmount
+          ? Number(pay.tokenAmount || 0)
+          : inferredBundle
+            ? Number(inferredBundle.tokenAmount || 0)
+            : 0;
         const user = pay.userId
-          ? (await db.select().from(users).where(eq(users.id, pay.userId)).limit(1))[0]
+          ? (await db.select({ name: users.name }).from(users).where(eq(users.id, pay.userId)).limit(1))[0]
           : null;
         const pkg = pay.packageId
-          ? (await db.select().from(packages).where(eq(packages.id, pay.packageId)).limit(1))[0]
+          ? (await db.select({ name: packages.name }).from(packages).where(eq(packages.id, pay.packageId)).limit(1))[0]
           : null;
         return {
           ...pay,
           amount: Number(pay.amount),
+          paymentType: inferredPaymentType,
+          paymentKind: inferredPaymentType,
+          tokenAmount: inferredTokenAmount,
           userName: user?.name || 'Unknown',
           packageName: pkg?.name || '—',
+          slipUrl: paymentCols.slipUrl ? pay.slipUrl : null,
+          paymentDate: paymentCols.paymentDate ? pay.paymentDate : null,
         };
       })
     );
@@ -585,6 +783,7 @@ router.get('/payments', requireAdmin as any, async (req: any, res: Response) => 
 router.post('/payments', requireAdmin as any, async (req: any, res: Response) => {
   try {
     const { userId, amount, paymentType = 'package', tokenAmount = 0 } = req.body;
+    const includePackageId = await hasUserPackageColumn();
 
     if (!userId || !amount) {
       return res.status(400).json({ error: 'Missing payment fields' });
@@ -598,17 +797,20 @@ router.post('/payments', requireAdmin as any, async (req: any, res: Response) =>
     const user = userResult[0];
 
     const paymentId = crypto.randomUUID();
-    await db.insert(payments).values({
+    const paymentValues: any = {
       id: paymentId,
       userId,
-      packageId: user.packageId || '',
       paymentType,
       tokenAmount: Number(tokenAmount || 0),
       amount: amount.toString(),
       status: 'paid',
       recordedBy: req.user?.userId || null,
       paymentDate: new Date(),
-    });
+    };
+    if (includePackageId) {
+      paymentValues.packageId = user.packageId || '';
+    }
+    await db.insert(payments).values(paymentValues);
 
     // If it's a token top-up, credit user's bonusTokens immediately
     if (paymentType === 'token_topup' && Number(tokenAmount) > 0) {
@@ -629,24 +831,26 @@ router.post('/payments', requireAdmin as any, async (req: any, res: Response) =>
 router.put('/payments/:id/pay', requireAdmin as any, async (req: any, res: Response) => {
   try {
     const { id } = req.params;
+    const includePackageId = await hasUserPackageColumn();
+    const includeBonusTokens = await hasBonusTokensColumn();
 
-    const existing = await db.select().from(payments).where(eq(payments.id, id)).limit(1);
-    if (existing.length === 0) {
+    const pay = await getPaymentByIdRaw(id);
+    if (!pay) {
       return res.status(404).json({ error: 'Payment not found' });
     }
 
-    const pay = existing[0];
+    if (pay.paymentType === 'token_topup') {
+      if (!includeBonusTokens) {
+        return res.status(503).json({ error: 'bonus_tokens column is not available yet. Please run migrations on this server.' });
+      }
+    } else if (!includePackageId) {
+      return res.status(400).json({ error: 'Server ນີ້ຍັງບໍ່ຮອງຮັບ package assignment' });
+    }
+
     const adminId = req.user?.userId || null;
 
     // Update payment record
-    await db
-      .update(payments)
-      .set({
-        status: 'paid',
-        paymentDate: new Date(),
-        recordedBy: adminId,
-      })
-      .where(eq(payments.id, id));
+    await updatePaymentStatusRaw(id, 'paid', adminId);
 
     if (pay.paymentType === 'token_topup') {
       await db
@@ -664,7 +868,7 @@ router.put('/payments/:id/pay', requireAdmin as any, async (req: any, res: Respo
     res.json({ message: 'Payment confirmed successfully' });
   } catch (error) {
     console.error('Confirm payment error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json(adminPaymentErrorResponse('Confirm payment', error));
   }
 });
 
@@ -673,25 +877,19 @@ router.put('/payments/:id/reject', requireAdmin as any, async (req: any, res: Re
   try {
     const { id } = req.params;
 
-    const existing = await db.select().from(payments).where(eq(payments.id, id)).limit(1);
-    if (existing.length === 0) {
+    const existing = await getPaymentByIdRaw(id);
+    if (!existing) {
       return res.status(404).json({ error: 'Payment not found' });
     }
 
     const adminId = req.user?.userId || null;
 
-    await db
-      .update(payments)
-      .set({
-        status: 'rejected',
-        recordedBy: adminId,
-      })
-      .where(eq(payments.id, id));
+    await updatePaymentStatusRaw(id, 'rejected', adminId);
 
     res.json({ message: 'Payment rejected successfully' });
   } catch (error) {
     console.error('Reject payment error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json(adminPaymentErrorResponse('Reject payment', error));
   }
 });
 
@@ -722,15 +920,12 @@ router.post('/bank-accounts', requireAdmin as any, async (req: any, res: Respons
         const buffer = Buffer.from(base64Data, 'base64');
         const uniqueFileName = `${crypto.randomUUID()}-${qrCodeName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
         
-        const uploadDir = path.resolve(__dirname, '../../uploads/banks');
-        if (!fs.existsSync(uploadDir)) {
-          fs.mkdirSync(uploadDir, { recursive: true });
-        }
+        const uploadDir = ensureUploadsDir('banks');
 
         const filePath = path.join(uploadDir, uniqueFileName);
         fs.writeFileSync(filePath, buffer);
         
-        qrCodeUrl = `/uploads/banks/${uniqueFileName}`;
+        qrCodeUrl = toPublicUploadPath('banks', uniqueFileName);
       } catch (uploadError) {
         console.error('QR code upload write error:', uploadError);
         return res.status(500).json({ error: 'ເກີດຂໍ້ຜິດພາດໃນການບັນທຶກຮູບພາບ QR Code' });
@@ -777,15 +972,12 @@ router.put('/bank-accounts/:id', requireAdmin as any, async (req: any, res: Resp
         const buffer = Buffer.from(base64Data, 'base64');
         const uniqueFileName = `${crypto.randomUUID()}-${qrCodeName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
         
-        const uploadDir = path.resolve(__dirname, '../../uploads/banks');
-        if (!fs.existsSync(uploadDir)) {
-          fs.mkdirSync(uploadDir, { recursive: true });
-        }
+        const uploadDir = ensureUploadsDir('banks');
 
         const filePath = path.join(uploadDir, uniqueFileName);
         fs.writeFileSync(filePath, buffer);
         
-        updates.qrCodeUrl = `/uploads/banks/${uniqueFileName}`;
+        updates.qrCodeUrl = toPublicUploadPath('banks', uniqueFileName);
       } catch (uploadError) {
         console.error('QR code upload write error:', uploadError);
         return res.status(500).json({ error: 'ເກີດຂໍ້ຜິດພາດໃນການບັນທຶກຮູບພາບ QR Code' });

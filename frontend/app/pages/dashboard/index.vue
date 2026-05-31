@@ -199,7 +199,10 @@ async function fetchCustomersCount() {
     let recent = 0;
     const now = Date.now();
     for (const page of pagesList.value) {
-      const customers = await $fetch<any[]>(`${apiUrl}/api/customers/page/${page.id}`, { headers: headers.value });
+      const customers = await $fetch<any[]>(`${apiUrl}/api/customers/page/${page.id}`, {
+        headers: headers.value,
+        cache: 'no-store',
+      });
       if (Array.isArray(customers)) {
         total += customers.length;
         recent += customers.filter((c: any) => {

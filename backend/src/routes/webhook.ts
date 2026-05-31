@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { db } from '../config/db';
+import { db, poolConnection } from '../config/db';
 import { pages, customers, chatLogs, users, packages } from '../db/schema';
 import { eq, and, desc, sql, inArray, gte } from 'drizzle-orm';
 import { fetchUserProfile, sendTextMessage } from '../services/facebook';
@@ -8,6 +8,140 @@ import { authenticateToken } from '../middleware/auth';
 import crypto from 'crypto';
 
 const router = Router();
+
+let bonusTokensColumnPromise: Promise<boolean> | null = null;
+let userPackageColumnPromise: Promise<boolean> | null = null;
+
+async function hasBonusTokensColumn() {
+  if (!bonusTokensColumnPromise) {
+    bonusTokensColumnPromise = poolConnection
+      .query(
+        `
+          SELECT COUNT(*) AS count
+          FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'users'
+            AND COLUMN_NAME = 'bonus_tokens'
+        `
+      )
+      .then(([rows]: any) => Number(rows?.[0]?.count || 0) > 0)
+      .catch((error) => {
+        bonusTokensColumnPromise = null;
+        throw error;
+      });
+  }
+
+  return bonusTokensColumnPromise;
+}
+
+async function hasUserPackageColumn() {
+  if (!userPackageColumnPromise) {
+    userPackageColumnPromise = poolConnection
+      .query(
+        `
+          SELECT COUNT(*) AS count
+          FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'users'
+            AND COLUMN_NAME = 'package_id'
+        `
+      )
+      .then(([rows]: any) => Number(rows?.[0]?.count || 0) > 0)
+      .catch((error) => {
+        userPackageColumnPromise = null;
+        throw error;
+      });
+  }
+
+  return userPackageColumnPromise;
+}
+
+function summarizeError(error: any) {
+  return {
+    code: error?.code || error?.errno || error?.name || 'UNKNOWN_ERROR',
+    message: error?.sqlMessage || error?.message || 'Unknown error',
+    sqlState: error?.sqlState,
+  };
+}
+
+function simulatorErrorResponse(stage: string, error: any) {
+  const summary = summarizeError(error);
+  return {
+    error: `Simulation failed at ${stage}: ${summary.message}`,
+    stage,
+    code: summary.code,
+    sqlState: summary.sqlState,
+  };
+}
+
+async function getPageByFacebookId(fbPageId: string) {
+  const [rows]: any = await poolConnection.query(
+    `
+      SELECT \`id\`, \`user_id\` AS \`userId\`, \`fb_page_id\` AS \`fbPageId\`, \`fb_page_name\` AS \`fbPageName\`,
+             \`fb_page_access_token\` AS \`fbPageAccessToken\`, \`knowledge_base\` AS \`knowledgeBase\`,
+             \`ai_name\` AS \`aiName\`, \`is_active\` AS \`isActive\`
+      FROM \`pages\`
+      WHERE \`fb_page_id\` = ?
+      LIMIT 1
+    `,
+    [fbPageId]
+  );
+
+  return rows?.[0] || null;
+}
+
+async function getCustomerByPageAndPsid(pageId: string, senderPsid: string) {
+  const [rows]: any = await poolConnection.query(
+    `
+      SELECT \`id\`, \`page_id\` AS \`pageId\`, \`fb_psid\` AS \`fbPsid\`, \`full_name\` AS \`fullName\`,
+             \`first_name\` AS \`firstName\`, \`last_name\` AS \`lastName\`, \`notes\`
+      FROM \`customers\`
+      WHERE \`page_id\` = ? AND \`fb_psid\` = ?
+      LIMIT 1
+    `,
+    [pageId, senderPsid]
+  );
+
+  return rows?.[0] || null;
+}
+
+async function getCustomerLogs(customerId: string) {
+  const [rows]: any = await poolConnection.query(
+    `
+      SELECT \`id\`, \`message_in\` AS \`messageIn\`, \`message_out\` AS \`messageOut\`,
+             \`token_count\` AS \`tokenCount\`, \`created_at\` AS \`createdAt\`
+      FROM \`chat_logs\`
+      WHERE \`customer_id\` = ?
+      ORDER BY \`created_at\` DESC
+      LIMIT 5
+    `,
+    [customerId]
+  );
+
+  return rows || [];
+}
+
+async function getPageOwner(pageUserId: string) {
+  const includePackageId = await hasUserPackageColumn();
+  const includeBonusTokens = await hasBonusTokensColumn();
+
+  const selectColumns = [
+    '`id`',
+    '`name`',
+    '`email`',
+    '`role`',
+  ];
+
+  if (includePackageId) selectColumns.push('`package_id` AS `packageId`');
+  if (includeBonusTokens) selectColumns.push('`bonus_tokens` AS `bonusTokens`');
+
+  const [rows]: any = await poolConnection.query(
+    `SELECT ${selectColumns.join(', ')} FROM \`users\` WHERE \`id\` = ? LIMIT 1`,
+    [pageUserId]
+  );
+
+  return rows?.[0] || null;
+}
 
 // Facebook Webhook Verification (GET /webhook/facebook)
 router.get('/', (req, res) => {
@@ -31,101 +165,85 @@ router.get('/', (req, res) => {
 
 // Main Message Processor Helper
 export async function processIncomingMessage(fbPageId: string, senderPsid: string, messageText: string, isSimulator = false) {
+  let stage = 'start';
   const monthStart = new Date();
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
 
-  // 1. Fetch the connected page from DB
-  const pageResult = await db.select().from(pages).where(eq(pages.fbPageId, fbPageId)).limit(1);
-  if (pageResult.length === 0) {
-    console.warn(`[Webhook Processor] Page with Facebook ID ${fbPageId} not found in DB.`);
-    return null;
-  }
-
-  const page = pageResult[0];
-  if (!page.isActive) {
-    console.log(`[Webhook Processor] Page "${page.fbPageName}" is currently deactivated.`);
-    return null;
-  }
-
-  // 2. Fetch or create Customer Profile
-  let customerResult = await db
-    .select()
-    .from(customers)
-    .where(and(eq(customers.fbPsid, senderPsid), eq(customers.pageId, page.id)))
-    .limit(1);
-
-  let customerId: string;
-  let customerName = 'Guest User';
-  let customerNotes = '';
-
-  if (customerResult.length === 0) {
-    customerId = crypto.randomUUID();
-
-    if (isSimulator) {
-      // Simulator: skip Facebook API call, create a local guest profile
-      customerName = `Simulator User (${senderPsid})`;
-      await db.insert(customers).values({
-        id: customerId,
-        pageId: page.id,
-        fbPsid: senderPsid,
-        fullName: customerName,
-        firstName: 'Simulator',
-        lastName: senderPsid,
-      });
-    } else {
-      console.log(`[Webhook Processor] New customer detected. Fetching Facebook profile for PSID: ${senderPsid}`);
-      const fbProfile = await fetchUserProfile(senderPsid, page.fbPageAccessToken);
-      customerName = fbProfile.fullName;
-
-      await db.insert(customers).values({
-        id: customerId,
-        pageId: page.id,
-        fbPsid: senderPsid,
-        fullName: fbProfile.fullName,
-        firstName: fbProfile.firstName,
-        lastName: fbProfile.lastName,
-        profilePic: fbProfile.profilePic,
-      });
+  try {
+    stage = 'load_page';
+    const page = await getPageByFacebookId(fbPageId);
+    if (!page) {
+      console.warn(`[Webhook Processor] Page with Facebook ID ${fbPageId} not found in DB.`);
+      return null;
     }
-  } else {
-    customerId = customerResult[0].id;
-    customerName = customerResult[0].fullName || 'Guest User';
-    customerNotes = customerResult[0].notes || '';
-  }
 
-  // 3. Retrieve recent conversation logs to give AI memory context
-  const previousLogs = await db
-    .select()
-    .from(chatLogs)
-    .where(eq(chatLogs.customerId, customerId))
-    .orderBy(desc(chatLogs.createdAt))
-    .limit(5);
+    if (!page.isActive) {
+      console.log(`[Webhook Processor] Page "${page.fbPageName}" is currently deactivated.`);
+      return null;
+    }
 
-  // Map to format required by Gemini service (oldest first)
-  const chatHistory = previousLogs
-    .reverse()
-    .map((log) => [
-      { role: 'user' as const, text: log.messageIn },
-      { role: 'model' as const, text: log.messageOut },
-    ])
-    .flat();
+    stage = 'load_customer';
+    let customer = await getCustomerByPageAndPsid(page.id, senderPsid);
 
-  // Token Limit Enforcement Check
-  const pageOwnerResult = await db.select().from(users).where(eq(users.id, page.userId)).limit(1);
-  if (pageOwnerResult.length > 0) {
-    const owner = pageOwnerResult[0];
-    if (owner.role !== 'admin' && owner.packageId) {
+    let customerId: string;
+    let customerName = 'Guest User';
+    let customerNotes = '';
+
+    if (!customer) {
+      customerId = crypto.randomUUID();
+
+      if (isSimulator) {
+        customerName = `Simulator User (${senderPsid})`;
+        await db.insert(customers).values({
+          id: customerId,
+          pageId: page.id,
+          fbPsid: senderPsid,
+          fullName: customerName,
+          firstName: 'Simulator',
+          lastName: senderPsid,
+        });
+      } else {
+        console.log(`[Webhook Processor] New customer detected. Fetching Facebook profile for PSID: ${senderPsid}`);
+        const fbProfile = await fetchUserProfile(senderPsid, page.fbPageAccessToken);
+        customerName = fbProfile.fullName;
+
+        await db.insert(customers).values({
+          id: customerId,
+          pageId: page.id,
+          fbPsid: senderPsid,
+          fullName: fbProfile.fullName,
+          firstName: fbProfile.firstName,
+          lastName: fbProfile.lastName,
+          profilePic: fbProfile.profilePic,
+        });
+      }
+    } else {
+      customerId = customer.id;
+      customerName = customer.fullName || 'Guest User';
+      customerNotes = customer.notes || '';
+    }
+
+    stage = 'load_chat_history';
+    const previousLogs = await getCustomerLogs(customerId);
+    const chatHistory = previousLogs
+      .reverse()
+      .map((log: any) => [
+        { role: 'user' as const, text: log.messageIn },
+        { role: 'model' as const, text: log.messageOut },
+      ])
+      .flat();
+
+    stage = 'load_owner';
+    const owner = await getPageOwner(page.userId);
+    if (owner && owner.role !== 'admin' && owner.packageId) {
       const pkgResult = await db.select().from(packages).where(eq(packages.id, owner.packageId)).limit(1);
       if (pkgResult.length > 0) {
         const pkg = pkgResult[0];
-
-        // 1. Find all pages owned by this tenant
         const ownerPages = await db.select({ id: pages.id }).from(pages).where(eq(pages.userId, owner.id));
-        const ownerPageIds = ownerPages.map(p => p.id);
+        const ownerPageIds = ownerPages.map((p) => p.id);
 
         if (ownerPageIds.length > 0) {
-          // 2. Sum the tokens consumed across all their pages
           const usageResult = await db
             .select({
               totalTokens: sql<number>`COALESCE(SUM(${chatLogs.tokenCount}), 0)`
@@ -137,19 +255,15 @@ export async function processIncomingMessage(fbPageId: string, senderPsid: strin
           const bonusTokens = Number(owner.bonusTokens || 0);
           const totalAllowance = Number(pkg.maxTokens || 0) + bonusTokens;
 
-          // 3. Block AI if usage exceeds monthly allowance + purchased token bonus
           if (totalUsed >= totalAllowance) {
             console.warn(`[Webhook Processor] User ${owner.name} (${owner.email}) has exceeded token limit. Used: ${totalUsed}/${totalAllowance}`);
-            const limitReply = "ຂໍອະໄພໃນຄວາມບໍ່ສະດວກ, ຂະນະນີ້ລະບົບຕອບກັບອັດຕະໂນມັດກຳລັງປັບປຸງຊົ່ວຄາວ. ຜູ້ດູແລລະບົບ (ແອດມິນ) ຈະຕິດຕໍ່ກັບຫາທ່ານໂດຍໄວທີ່ສຸດ.";
-            
-            // Send notice back to Facebook so the end-user knows
+            const limitReply = 'ຂໍອະໄພໃນຄວາມບໍ່ສະດວກ, ຂະນະນີ້ລະບົບຕອບກັບອັດຕະໂນມັດກຳລັງປັບປຸງຊົ່ວຄາວ. ຜູ້ດູແລລະບົບ (ແອດມິນ) ຈະຕິດຕໍ່ກັບຫາທ່ານໂດຍໄວທີ່ສຸດ.';
             const sendSuccess = await sendTextMessage(senderPsid, limitReply, page.fbPageAccessToken);
 
-            // Log blocked conversation in ChatLogs with 0 tokens
             await db.insert(chatLogs).values({
               id: crypto.randomUUID(),
               pageId: page.id,
-              customerId: customerId,
+              customerId,
               messageIn: messageText,
               messageOut: limitReply,
               tokenCount: 0,
@@ -160,38 +274,35 @@ export async function processIncomingMessage(fbPageId: string, senderPsid: strin
         }
       }
     }
-  }
 
-  // 4. Call Gemini AI to generate response (now returns { text, tokenCount })
-  const aiResult = await generateAiResponse(
-    messageText,
-    page.knowledgeBase,
-    customerName,
-    customerNotes,
-    chatHistory,
-    page.aiName || undefined,
-    page.aiConfigId || null
-  );
+    stage = 'generate_ai';
+    const aiResult = await generateAiResponse(
+      messageText,
+      page.knowledgeBase,
+      customerName,
+      customerNotes,
+      chatHistory,
+      page.aiName || undefined,
+      page.aiConfigId || null
+    );
 
-  const aiReplyText = aiResult.text;
-  const tokenCount = aiResult.tokenCount;
+    const aiReplyText = aiResult.text;
+    const tokenCount = aiResult.tokenCount;
 
-  // 5. Send message back to Facebook
-  const sendSuccess = await sendTextMessage(senderPsid, aiReplyText, page.fbPageAccessToken);
+    stage = 'send_message';
+    const sendSuccess = await sendTextMessage(senderPsid, aiReplyText, page.fbPageAccessToken);
 
-  // 6. Log conversation in ChatLogs with token count
-  await db.insert(chatLogs).values({
-    id: crypto.randomUUID(),
-    pageId: page.id,
-    customerId: customerId,
-    messageIn: messageText,
-    messageOut: aiReplyText,
-    tokenCount: tokenCount,
-  });
+    stage = 'log_chat';
+    await db.insert(chatLogs).values({
+      id: crypto.randomUUID(),
+      pageId: page.id,
+      customerId,
+      messageIn: messageText,
+      messageOut: aiReplyText,
+      tokenCount: tokenCount,
+    });
 
-  if (pageOwnerResult.length > 0) {
-    const owner = pageOwnerResult[0];
-    if (owner.role !== 'admin' && owner.packageId && tokenCount > 0) {
+    if (owner && owner.role !== 'admin' && owner.packageId && tokenCount > 0) {
       const pkgResult = await db.select().from(packages).where(eq(packages.id, owner.packageId)).limit(1);
       if (pkgResult.length > 0) {
         const pkg = pkgResult[0];
@@ -222,9 +333,15 @@ export async function processIncomingMessage(fbPageId: string, senderPsid: strin
         }
       }
     }
-  }
 
-  return { customerName, reply: aiReplyText, sent: sendSuccess };
+    return { customerName, reply: aiReplyText, sent: sendSuccess };
+  } catch (error) {
+    console.error(`[Webhook Processor] Failed at stage ${stage}:`, error);
+    if (error && typeof error === 'object') {
+      (error as any).stage = stage;
+    }
+    throw error;
+  }
 }
 
 // Facebook Incoming Messages webhook (POST /webhook/facebook)
@@ -284,7 +401,14 @@ router.post('/simulate', authenticateToken as any, async (req, res) => {
     });
   } catch (error) {
     console.error('[Simulator] Error processing simulation:', error);
-    res.status(500).json({ error: 'Internal server error during simulation.' });
+    const summary = summarizeError(error);
+    const stage = (error as any)?.stage || 'unknown';
+    res.status(500).json({
+      error: `ການຈຳລອງຂໍ້ຄວາມລົ້ມທີ່ stage "${stage}": ${summary.message}`,
+      stage,
+      code: summary.code,
+      sqlState: summary.sqlState,
+    });
   }
 });
 

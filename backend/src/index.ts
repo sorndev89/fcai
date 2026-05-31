@@ -13,6 +13,7 @@ import usageRoutes from './routes/usage';
 import aiConfigRoutes from './routes/aiConfig';
 import facebookOAuthRoutes from './routes/facebook-oauth';
 import paymentRoutes from './routes/payments';
+import { getUploadsRoot } from './utils/uploads';
 
 dotenv.config();
 
@@ -22,12 +23,12 @@ const NODE_ENV = process.env.NODE_ENV || 'development';
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cookieParser());
 
 // Serve uploaded files (payment slips & QR codes)
-const uploadsPath = path.resolve(__dirname, '../uploads');
+const uploadsPath = getUploadsRoot();
 app.use('/uploads', express.static(uploadsPath));
 
 // Health Check
@@ -62,6 +63,17 @@ app.use('/api/admin/ai-config', aiConfigRoutes);
 app.use('/webhook/facebook', webhookRoutes);
 app.use('/api/auth/facebook', facebookOAuthRoutes);
 app.use('/api/payments', paymentRoutes);
+
+// Body parser / request size errors should not collapse into a generic 500.
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err?.type === 'entity.too.large' || err?.status === 413) {
+    return res.status(413).json({
+      error: 'ไฟล์รูปมีขนาดใหญ่เกินไป กรุณาลดขนาดรูปแล้วลองใหม่',
+    });
+  }
+
+  return next(err);
+});
 
 // -------------------------------------------------------
 // Production: Serve the bundled frontend SPA directly

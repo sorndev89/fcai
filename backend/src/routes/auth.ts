@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { db } from '../config/db';
+import { db, poolConnection } from '../config/db';
 import { users, packages } from '../db/schema';
 import { eq, asc } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
@@ -9,6 +9,66 @@ import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'fb-chatbot-super-secret-key-12345';
+
+let bonusTokensColumnPromise: Promise<boolean> | null = null;
+let userPackageColumnPromise: Promise<boolean> | null = null;
+
+async function hasBonusTokensColumn() {
+  if (!bonusTokensColumnPromise) {
+    bonusTokensColumnPromise = poolConnection
+      .query(
+        `
+          SELECT COUNT(*) AS count
+          FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'users'
+            AND COLUMN_NAME = 'bonus_tokens'
+        `
+      )
+      .then(([rows]: any) => Number(rows?.[0]?.count || 0) > 0)
+      .catch((error) => {
+        bonusTokensColumnPromise = null;
+        throw error;
+      });
+  }
+
+  return bonusTokensColumnPromise;
+}
+
+async function hasUserPackageColumn() {
+  if (!userPackageColumnPromise) {
+    userPackageColumnPromise = poolConnection
+      .query(
+        `
+          SELECT COUNT(*) AS count
+          FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'users'
+            AND COLUMN_NAME = 'package_id'
+        `
+      )
+      .then(([rows]: any) => Number(rows?.[0]?.count || 0) > 0)
+      .catch((error) => {
+        userPackageColumnPromise = null;
+        throw error;
+      });
+  }
+
+  return userPackageColumnPromise;
+}
+
+function userSelect(includeBonusTokens: boolean, includePackageId: boolean) {
+  return {
+    id: users.id,
+    email: users.email,
+    password: users.password,
+    name: users.name,
+    role: users.role,
+    status: users.status,
+    ...(includePackageId ? { packageId: users.packageId } : {}),
+    ...(includeBonusTokens ? { bonusTokens: users.bonusTokens } : {}),
+  } as const;
+}
 
 // Public endpoint to retrieve active subscription packages for registration form
 router.get('/packages', async (req, res) => {
@@ -29,6 +89,7 @@ router.get('/packages', async (req, res) => {
 router.post('/register', async (req, res) => {
   try {
     const { email, password, name, packageId } = req.body;
+    const includePackageId = await hasUserPackageColumn();
 
     if (!email || !password || !name || !packageId) {
       return res.status(400).json({ error: 'ກະລຸນາປ້ອນຂໍ້ມູນໃຫ້ຄົບຖ້ວນ ລວມທັງເລືອກແພັກເກດ' });
@@ -58,7 +119,7 @@ router.post('/register', async (req, res) => {
       name,
       role: 'tenant',
       status: 'pending',
-      packageId,
+      ...(includePackageId ? { packageId } : {}),
     });
 
     res.status(201).json({
@@ -81,7 +142,13 @@ router.post('/login', async (req, res) => {
     }
 
     // Fetch user
-    const userResult = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    const includeBonusTokens = await hasBonusTokensColumn();
+    const includePackageId = await hasUserPackageColumn();
+    const userResult = await db
+      .select(userSelect(includeBonusTokens, includePackageId))
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
     if (userResult.length === 0) {
       return res.status(401).json({ error: 'ອີເມວ ຫຼື ລະຫັດຜ່ານບໍ່ຖືກຕ້ອງ' });
     }
@@ -114,7 +181,15 @@ router.post('/login', async (req, res) => {
     res.json({
       message: 'ເຂົ້າສູ່ລະບົບສຳເລັດ',
       token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role, status: user.status, packageId: user.packageId, bonusTokens: user.bonusTokens ?? 0 },
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        status: user.status,
+        ...(includePackageId ? { packageId: user.packageId } : {}),
+        bonusTokens: includeBonusTokens ? Number((user as any).bonusTokens || 0) : 0,
+      },
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -130,7 +205,13 @@ router.get('/me', authenticateToken as any, async (req: AuthenticatedRequest, re
       return res.status(401).json({ error: 'ບໍ່ມີສິດເຂົ້າເຖິງ' });
     }
 
-    const userResult = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    const includeBonusTokens = await hasBonusTokensColumn();
+    const includePackageId = await hasUserPackageColumn();
+    const userResult = await db
+      .select(userSelect(includeBonusTokens, includePackageId))
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
     if (userResult.length === 0) {
       return res.status(404).json({ error: 'ບໍ່ພົບຜູ້ໃຊ້' });
     }
@@ -142,8 +223,8 @@ router.get('/me', authenticateToken as any, async (req: AuthenticatedRequest, re
       name: user.name,
       role: user.role,
       status: user.status,
-      packageId: user.packageId,
-      bonusTokens: user.bonusTokens ?? 0,
+      ...(includePackageId ? { packageId: user.packageId } : {}),
+      bonusTokens: includeBonusTokens ? Number((user as any).bonusTokens || 0) : 0,
     });
   } catch (error) {
     console.error('Get profile error:', error);

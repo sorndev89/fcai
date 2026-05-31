@@ -1,10 +1,34 @@
 import { Router } from 'express';
-import { db } from '../config/db';
+import { db, poolConnection } from '../config/db';
 import { chatLogs, pages, users } from '../db/schema';
 import { eq, inArray, sql, and, gte } from 'drizzle-orm';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
+
+let bonusTokensColumnPromise: Promise<boolean> | null = null;
+
+async function hasBonusTokensColumn() {
+  if (!bonusTokensColumnPromise) {
+    bonusTokensColumnPromise = poolConnection
+      .query(
+        `
+          SELECT COUNT(*) AS count
+          FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'users'
+            AND COLUMN_NAME = 'bonus_tokens'
+        `
+      )
+      .then(([rows]: any) => Number(rows?.[0]?.count || 0) > 0)
+      .catch((error) => {
+        bonusTokensColumnPromise = null;
+        throw error;
+      });
+  }
+
+  return bonusTokensColumnPromise;
+}
 
 // Apply auth middleware to all routes
 router.use(authenticateToken as any);
@@ -21,12 +45,15 @@ router.get('/my', async (req: AuthenticatedRequest, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const userResult = await db
-      .select({ bonusTokens: users.bonusTokens })
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-    const bonusTokens = Number(userResult[0]?.bonusTokens || 0);
+    const includeBonusTokens = await hasBonusTokensColumn();
+    const userResult = includeBonusTokens
+      ? await db
+          .select({ bonusTokens: users.bonusTokens })
+          .from(users)
+          .where(eq(users.id, userId))
+          .limit(1)
+      : [];
+    const bonusTokens = includeBonusTokens ? Number(userResult[0]?.bonusTokens || 0) : 0;
 
     // Get all page IDs owned by this user
     const userPages = await db.select({ id: pages.id }).from(pages).where(eq(pages.userId, userId));

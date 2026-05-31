@@ -58,10 +58,8 @@ export async function getActiveTokenBundles() {
       .where(eq(tokenBundles.isActive, true))
       .orderBy(asc(tokenBundles.sortOrder), asc(tokenBundles.price));
   } catch (error: any) {
-    if (error?.code === 'ER_NO_SUCH_TABLE') {
-      return DEFAULT_BUNDLES;
-    }
-    throw error;
+    console.warn('Token bundle query fallback:', error?.code || error?.message || error);
+    return DEFAULT_BUNDLES;
   }
 }
 
@@ -73,10 +71,7 @@ export async function getAllTokenBundles() {
       .from(tokenBundles)
       .orderBy(asc(tokenBundles.sortOrder), asc(tokenBundles.price));
   } catch (error: any) {
-    if (error?.code === 'ER_NO_SUCH_TABLE') {
-      return [...DEFAULT_BUNDLES];
-    }
-    throw error;
+    console.warn('Token bundle query fallback:', error?.code || error?.message || error);
+    return [...DEFAULT_BUNDLES];
   }
 }
-
