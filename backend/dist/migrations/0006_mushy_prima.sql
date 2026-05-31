@@ -1,0 +1,1 @@
+ALTER TABLE `pages` ADD `ai_name` varchar(255) DEFAULT 'ຜູ້ຊ່ວຍ AI';

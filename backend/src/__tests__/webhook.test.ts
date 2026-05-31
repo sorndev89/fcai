@@ -164,7 +164,8 @@ describe('processIncomingMessage() — full flow', () => {
       'We sell premium Lao coffee.',
       'John Doe',
       '',
-      []
+      [],
+      undefined
     );
 
     // Verify token count in chat log insert (2nd values call — 1st is customer insert)
@@ -223,7 +224,8 @@ describe('processIncomingMessage() — full flow', () => {
       expect.arrayContaining([
         expect.objectContaining({ role: 'user', text: 'Do you have coffee?' }),
         expect.objectContaining({ role: 'model', text: 'Yes, we have premium Lao coffee!' }),
-      ])
+      ]),
+      undefined
     );
   });
 

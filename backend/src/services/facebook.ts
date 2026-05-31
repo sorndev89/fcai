@@ -82,3 +82,33 @@ export async function sendTextMessage(recipientPsid: string, text: string, pageA
     return false;
   }
 }
+
+/**
+ * Tests the connection to a Facebook Page using the provided credentials.
+ */
+export async function testFacebookPageConnection(fbPageId: string, pageAccessToken: string): Promise<{ success: boolean; error?: string; pageName?: string }> {
+  if (pageAccessToken.startsWith('mock') || pageAccessToken === 'test') {
+    return { success: true, pageName: 'Mock/Test Connection Page' };
+  }
+
+  try {
+    const url = `https://graph.facebook.com/v19.0/me?fields=name,id&access_token=${pageAccessToken}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      const errMsg = errData.error?.message || `Graph API returned status ${response.status}`;
+      return { success: false, error: errMsg };
+    }
+
+    const data = (await response.json()) as any;
+    if (data.id !== fbPageId) {
+      return { success: false, error: `Page ID ບໍ່ກົງກັນ: ໃນລະບົບແມ່ນ ${fbPageId}, ແຕ່ Token ທີ່ສົ່ງມາແມ່ນຂອງເພຈ ID ${data.id}` };
+    }
+
+    return { success: true, pageName: data.name };
+  } catch (error: any) {
+    console.error(`Error testing Facebook Page connection (${fbPageId}):`, error);
+    return { success: false, error: error.message || 'Unknown network error' };
+  }
+}
+

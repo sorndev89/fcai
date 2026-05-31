@@ -31,10 +31,9 @@ const FRONTEND_DIR = path.resolve(ROOT, '..', 'frontend');
 const DIST_DIR = path.resolve(ROOT, 'dist');
 const FRONTEND_OUTPUT = path.resolve(FRONTEND_DIR, '.output-dist');
 const FRONTEND_PUBLIC = path.resolve(FRONTEND_OUTPUT, 'public');
-const BUNDLED_FRONTEND = path.resolve(DIST_DIR, 'frontend');
-const BUNDLED_FRONTEND_PUBLIC = path.resolve(BUNDLED_FRONTEND, 'public');
+const BUNDLED_PUBLIC = path.resolve(DIST_DIR, 'public');
 const DB_MIGRATIONS_SRC = path.resolve(SRC_DIR, 'db', 'migrations');
-const DB_MIGRATIONS_DIST = path.resolve(DIST_DIR, 'db', 'migrations');
+const DB_MIGRATIONS_DIST = path.resolve(DIST_DIR, 'migrations');
 const PATCH_SCRIPT = path.resolve(__dirname, 'patch-fs-unlink.cjs');
 
 /** Cache directories to clean pre-build */
@@ -43,7 +42,7 @@ const CACHE_DIRS = [
   path.resolve(FRONTEND_DIR, '.vite-cache'),
   FRONTEND_OUTPUT,
   DIST_DIR,
-  BUNDLED_FRONTEND,
+  BUNDLED_PUBLIC,
 ];
 
 function log(msg) {
@@ -67,16 +66,24 @@ function cleanDir(dir) {
   if (fs.existsSync(dir)) {
     const rel = path.relative(ROOT, dir);
     log(`Cleaning cache: ${rel}`);
-    try {
-      execSync(
-        `if exist "${dir}" (` +
-        `  del /f /s /q /a "${dir}\\*" 2>nul &` +
-        `  rd /s /q "${dir}" 2>nul` +
-        `)`,
-        { stdio: 'pipe', shell: 'cmd.exe' }
-      );
-    } catch {
-      log(`Warning: Could not fully remove ${rel} (files may still be locked)`);
+    if (process.platform === 'win32') {
+      try {
+        execSync(
+          `if exist "${dir}" (` +
+          `  del /f /s /q /a "${dir}\\*" 2>nul &` +
+          `  rd /s /q "${dir}" 2>nul` +
+          `)`,
+          { stdio: 'pipe', shell: 'cmd.exe' }
+        );
+      } catch {
+        log(`Warning: Could not fully remove ${rel} (files may still be locked)`);
+      }
+    } else {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch (err) {
+        log(`Warning: Could not remove ${rel}: ${err.message}`);
+      }
     }
   }
 }
@@ -99,22 +106,14 @@ function buildFrontend(cwd) {
     try {
       log(`━━━ Frontend build attempt ${attempt}/${maxRetries} ━━━`);
 
-      // IMPORTANT: Do NOT use `npm run build` here — npm v11+ strips the
-      // NODE_OPTIONS environment variable from child processes for security,
-      // which would prevent the EPERM patch from being applied.
-      //
-      // Instead, invoke the Nuxt CLI binary directly via node --require so
-      // the patch is loaded before any nuxt/nitro code runs.
-      //
-      // We use `nuxi generate` (not `nuxi build`) because:
-      //   - The app is SPA mode (ssr: false) — no SSR needed
-      //   - Express already serves static files and handles SPA routing
-      //   - `nuxt build` generates a redundant Nitro server (node-server preset)
-      //   - `nuxt generate` outputs only static files (public/) — faster, smaller
       const nuxiPath = path.resolve(cwd, 'node_modules', '@nuxt', 'cli', 'bin', 'nuxi.mjs');
       const patchPath = PATCH_SCRIPT.replace(/\\/g, '/');
+      const cmd = process.platform === 'win32'
+        ? `node --require "${patchPath}" "${nuxiPath}" generate`
+        : `node "${nuxiPath}" generate`;
+
       execSync(
-        `node --require "${patchPath}" "${nuxiPath}" generate`,
+        cmd,
         { cwd, stdio: 'inherit', env: { ...process.env, NODE_OPTIONS: undefined } }
       );
 
@@ -143,13 +142,13 @@ try {
   // --------------------------------------------------
   // Step 0: Clean caches
   // --------------------------------------------------
-  log('━━━ Step 0/4: Cleaning build caches ━━━');
+  log('━━━ Step 0/5: Cleaning build caches ━━━');
   CACHE_DIRS.forEach(cleanDir);
 
   // --------------------------------------------------
   // Step 1: Build the Nuxt frontend (with EPERM fix)
   // --------------------------------------------------
-  log('━━━ Step 1/4: Building frontend (Nuxt SPA) ━━━');
+  log('━━━ Step 1/5: Building frontend (Nuxt SPA) ━━━');
   buildFrontend(FRONTEND_DIR);
 
   if (!fs.existsSync(FRONTEND_OUTPUT)) {
@@ -158,59 +157,57 @@ try {
   log(`Frontend built: ${FRONTEND_OUTPUT}`);
 
   // --------------------------------------------------
-  // Step 2: Compile all backend TypeScript via tsc (standard multi-file output)
   // --------------------------------------------------
-  // Uses the TypeScript compiler (`tsc`) to produce one `.js` file per `.ts`
-  // source file. This is the standard approach — multiple files, no bundling.
-  //
-  // tsc outputs to dist/ (as configured in tsconfig.json):
-  //   dist/index.js
-  //   dist/config/db.js
-  //   dist/db/migrate.js
-  //   dist/db/seed.js
-  //   dist/db/schema.js
-  //   dist/middleware/auth.js
-  //   dist/routes/*.js
-  //   dist/services/*.js
-  log('━━━ Step 2/4: Compiling backend (tsc → .js) ━━━');
-  run(`npx tsc`, ROOT);
+  // Step 2: Bundle all backend TypeScript files via esbuild into single CJS files
+  // --------------------------------------------------
+  // Compiles all code and dependencies into self-contained .cjs files
+  // so no npm install or node_modules are required on the server/VPS!
+  log('━━━ Step 2/5: Bundling backend via esbuild (.ts ➔ .cjs) ━━━');
+  
+  // 1. Bundle main index.ts
+  run(`npx esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.cjs`, ROOT);
+  // 2. Bundle database migration runner
+  run(`npx esbuild src/db/migrate.ts --bundle --platform=node --target=node20 --outfile=dist/migrate.cjs`, ROOT);
+  // 3. Bundle database seed runner
+  run(`npx esbuild src/db/seed.ts --bundle --platform=node --target=node20 --outfile=dist/seed.cjs`, ROOT);
 
   if (!fs.existsSync(DIST_DIR)) {
     throw new Error(`Backend dist output not found at ${DIST_DIR}`);
   }
 
-  log(`Backend compiled: ${DIST_DIR}`);
+  log(`Backend bundled: ${DIST_DIR}`);
 
   // --------------------------------------------------
   // Step 3: Bundle the frontend into backend/dist/
   // --------------------------------------------------
-  log('━━━ Step 3/4: Bundling frontend into backend/dist/ ━━━');
+  log('━━━ Step 3/5: Bundling frontend into backend/dist/ ━━━');
 
-  if (fs.existsSync(BUNDLED_FRONTEND)) {
+  if (fs.existsSync(BUNDLED_PUBLIC)) {
     log(`Removing previous bundle`);
-    try {
-      execSync(
-        `if exist "${BUNDLED_FRONTEND}" rd /s /q "${BUNDLED_FRONTEND}" 2>nul`,
-        { stdio: 'pipe', shell: 'cmd.exe' }
-      );
-    } catch {
-      fs.rmSync(BUNDLED_FRONTEND, { recursive: true, force: true });
+    if (process.platform === 'win32') {
+      try {
+        execSync(
+          `if exist "${BUNDLED_PUBLIC}" rd /s /q "${BUNDLED_PUBLIC}" 2>nul`,
+          { stdio: 'pipe', shell: 'cmd.exe' }
+        );
+      } catch {
+        fs.rmSync(BUNDLED_PUBLIC, { recursive: true, force: true });
+      }
+    } else {
+      fs.rmSync(BUNDLED_PUBLIC, { recursive: true, force: true });
     }
   }
 
   // Copy only the public/ directory (static output from nuxi generate).
-  // The Nitro server (server/) is excluded because Express handles SPA
-  // serving in production — no need for a redundant Nitro runtime.
-  // Express expects the files at dist/frontend/public/ (see src/index.ts).
-  log(`Copying public/ → dist/frontend/public/`);
-  fs.cpSync(FRONTEND_PUBLIC, BUNDLED_FRONTEND_PUBLIC, { recursive: true });
+  log(`Copying public/ → dist/public/`);
+  fs.cpSync(FRONTEND_PUBLIC, BUNDLED_PUBLIC, { recursive: true });
 
   // --------------------------------------------------
   // Step 4: Copy DB migration SQL files to dist/
   // --------------------------------------------------
-  // The compiled dist/db/migrate.js uses __dirname to find migrations,
-  // so the SQL files must be present at dist/db/migrations/.
-  log('━━━ Step 4/4: Copying DB migrations to dist/ ━━━');
+  // The compiled dist/migrate.cjs uses __dirname to find migrations,
+  // so the SQL files must be present at dist/migrations/.
+  log('━━━ Step 4/5: Copying DB migrations to dist/ ━━━');
   if (fs.existsSync(DB_MIGRATIONS_SRC)) {
     fs.cpSync(DB_MIGRATIONS_SRC, DB_MIGRATIONS_DIST, { recursive: true });
     log(`Copied migrations: ${DB_MIGRATIONS_DIST}`);
@@ -219,19 +216,63 @@ try {
   }
 
   // --------------------------------------------------
+  // Step 5: Copy deployment config files
+  // --------------------------------------------------
+  log('━━━ Step 5/5: Preparing production configuration files in dist/ ━━━');
+  
+  // Write a minimal package.json just for Plesk/Node environment detection
+  const minimalPkg = {
+    name: "facebook-chat-ai-production",
+    version: "1.0.0",
+    description: "Production self-contained build of Facebook Chat AI",
+    main: "index.cjs",
+    scripts: {
+      "start": "node index.cjs",
+      "db:migrate": "node migrate.cjs",
+      "db:seed": "node seed.cjs"
+    }
+  };
+  
+  fs.writeFileSync(
+    path.resolve(DIST_DIR, 'package.json'),
+    JSON.stringify(minimalPkg, null, 2),
+    'utf8'
+  );
+  log('Created minimal package.json ➔ dist/package.json');
+
+  // Create .node-version file for Plesk/nodenv
+  const nodeVersionSrc = path.resolve(ROOT, '.node-version');
+  const nodeVersionDest = path.resolve(DIST_DIR, '.node-version');
+  if (fs.existsSync(nodeVersionSrc)) {
+    fs.copyFileSync(nodeVersionSrc, nodeVersionDest);
+    log(`Copied .node-version ➔ dist/.node-version`);
+  } else {
+    fs.writeFileSync(nodeVersionDest, '20\n', 'utf8');
+    log(`Created default .node-version ➔ dist/.node-version`);
+  }
+
+  // Copy .env.example
+  const envExampleSrc = path.resolve(ROOT, '.env.example');
+  const envExampleDest = path.resolve(DIST_DIR, '.env.example');
+  if (fs.existsSync(envExampleSrc)) {
+    fs.copyFileSync(envExampleSrc, envExampleDest);
+    log(`Copied .env.example ➔ dist/.env.example`);
+  }
+
+  // --------------------------------------------------
   // Verify
   // --------------------------------------------------
-  if (!fs.existsSync(BUNDLED_FRONTEND_PUBLIC)) {
-    throw new Error(`Frontend bundle not found at ${BUNDLED_FRONTEND_PUBLIC}`);
+  if (!fs.existsSync(path.resolve(DIST_DIR, 'index.cjs'))) {
+    throw new Error(`Frontend bundle entry dist/index.cjs not found`);
   }
 
   log('━━━ ✅ Build complete! ━━━');
-  log(`   Server   : dist/index.js`);
-  log(`   Migrate  : node dist/db/migrate.js`);
-  log(`   Seed     : node dist/db/seed.js`);
-  log(`   Frontend : dist/frontend/public/`);
-  log(`   Startup  : NODE_ENV=production node dist/index.js`);
-  log(`   Or       : npm start`);
+  log(`   Deployable folder : dist/`);
+  log(`   Server Entry      : dist/index.cjs`);
+  log(`   Migrate           : node dist/migrate.cjs (within dist: node migrate.cjs)`);
+  log(`   Seed              : node dist/seed.cjs (within dist: node seed.cjs)`);
+  log(`   Frontend Public   : dist/public/`);
+  log(`   Deployment Startup: cd dist && NODE_ENV=production node index.cjs (No npm install required!)`);
 } catch (err) {
   console.error(`\n[build] ❌ Build failed: ${err.message}`);
   process.exit(1);

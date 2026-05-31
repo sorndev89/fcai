@@ -3,6 +3,8 @@ import { db } from '../config/db';
 import { aiConfig } from '../db/schema';
 import { eq, desc } from 'drizzle-orm';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
+import crypto from 'crypto';
+import { callAiProvider } from '../services/gemini';
 
 const router = Router();
 
@@ -175,6 +177,48 @@ router.get('/active', async (req, res) => {
   } catch (error) {
     console.error('[AI Config API] Error fetching active config:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/admin/ai-config/test
+ * Test an AI configuration connection.
+ * Body: { provider, modelName, apiKey, baseUrl }
+ */
+router.post('/test', requireAdmin as any, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { provider, modelName, apiKey, baseUrl } = req.body;
+
+    if (!apiKey) {
+      return res.status(400).json({ error: 'apiKey is required for testing' });
+    }
+
+    const testConfig = {
+      provider: provider || 'gemini',
+      modelName: modelName || 'gemini-2.0-flash',
+      apiKey,
+      baseUrl: baseUrl || null,
+    };
+
+    console.log(`[AI Config Test] Testing connection for provider: ${testConfig.provider}, model: ${testConfig.modelName}`);
+
+    // Call provider with a simple prompt
+    const systemInstruction = 'You are an API connection test assistant. Respond with exactly: "Success".';
+    const userMessage = 'Test connection.';
+
+    const result = await callAiProvider(testConfig, systemInstruction, [], userMessage, 0.1);
+
+    res.json({
+      success: true,
+      message: 'Connection test passed.',
+      response: result.text.trim()
+    });
+  } catch (error: any) {
+    console.error('[AI Config Test] Connection test failed:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message || 'API connection test failed. Check your API Key or Base URL.'
+    });
   }
 });
 

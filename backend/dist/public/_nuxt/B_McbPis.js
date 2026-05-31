@@ -1,0 +1,1 @@
+function o(){return typeof window<"u"?window.location.hostname==="localhost"||window.location.hostname==="127.0.0.1"?"http://localhost:5002":window.location.origin:"http://localhost:5002"}export{o as u};

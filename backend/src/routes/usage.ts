@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { db } from '../config/db';
 import { chatLogs, pages, users } from '../db/schema';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { eq, inArray, sql, and, gte } from 'drizzle-orm';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
@@ -21,9 +21,20 @@ router.get('/my', async (req: AuthenticatedRequest, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
+    const userResult = await db
+      .select({ bonusTokens: users.bonusTokens })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    const bonusTokens = Number(userResult[0]?.bonusTokens || 0);
+
     // Get all page IDs owned by this user
     const userPages = await db.select({ id: pages.id }).from(pages).where(eq(pages.userId, userId));
     const pageIds = userPages.map(p => p.id);
+
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
 
     if (pageIds.length === 0) {
       return res.json({
@@ -31,6 +42,7 @@ router.get('/my', async (req: AuthenticatedRequest, res) => {
         totalConversations: 0,
         pagesCount: 0,
         usageByPage: [],
+        bonusTokens,
       });
     }
 
@@ -44,7 +56,7 @@ router.get('/my', async (req: AuthenticatedRequest, res) => {
       })
       .from(chatLogs)
       .innerJoin(pages, eq(chatLogs.pageId, pages.id))
-      .where(inArray(chatLogs.pageId, pageIds))
+      .where(and(inArray(chatLogs.pageId, pageIds), gte(chatLogs.createdAt, monthStart)))
       .groupBy(chatLogs.pageId, pages.fbPageName);
 
     // Calculate grand totals
@@ -54,15 +66,38 @@ router.get('/my', async (req: AuthenticatedRequest, res) => {
         totalConversations: sql<number>`COUNT(*)`,
       })
       .from(chatLogs)
-      .where(inArray(chatLogs.pageId, pageIds));
+      .where(and(inArray(chatLogs.pageId, pageIds), gte(chatLogs.createdAt, monthStart)));
 
     const totals = grandTotal[0] || { totalTokens: 0, totalConversations: 0 };
+
+    // Fetch daily stats for the last 7 days
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const dailyStats = await db
+      .select({
+        date: sql<string>`DATE_FORMAT(${chatLogs.createdAt}, '%Y-%m-%d')`,
+        tokens: sql<number>`CAST(COALESCE(SUM(${chatLogs.tokenCount}), 0) AS SIGNED)`,
+        conversations: sql<number>`COUNT(*)`,
+      })
+      .from(chatLogs)
+      .where(
+        and(
+          inArray(chatLogs.pageId, pageIds),
+          gte(chatLogs.createdAt, sevenDaysAgo)
+        )
+      )
+      .groupBy(sql`DATE_FORMAT(${chatLogs.createdAt}, '%Y-%m-%d')`)
+      .orderBy(sql`DATE_FORMAT(${chatLogs.createdAt}, '%Y-%m-%d')`);
 
     res.json({
       totalTokens: totals.totalTokens,
       totalConversations: totals.totalConversations,
       pagesCount: pageIds.length,
       usageByPage,
+      dailyStats,
+      bonusTokens,
+      monthStart,
     });
   } catch (error) {
     console.error('[Usage API] Error fetching user token usage:', error);

@@ -278,14 +278,14 @@ describe('gemini.ts — AI Service', () => {
       expect(result.summary).toBeNull();
     });
 
-    it('should return mock data when no active config exists', async () => {
+    it('should return failure when no active config exists', async () => {
       mockLimit.mockResolvedValue([]);
 
       const result = await extractOrderSummary('Some chat logs');
 
-      expect(result.success).toBe(true);
-      expect(result.hasPurchase).toBe(true);
-      expect(result.summary?.customerName).toBe('ສົມພອນ ສິລິວົງ');
+      expect(result.success).toBe(false);
+      expect(result.hasPurchase).toBe(false);
+      expect(result.summary).toBeNull();
     });
 
     it('should handle JSON parse errors gracefully', async () => {

@@ -9,6 +9,7 @@ interface ChatMessage {
 }
 
 interface AiProviderConfig {
+  id?: string;
   provider: string;
   modelName: string;
   apiKey: string;
@@ -16,15 +17,19 @@ interface AiProviderConfig {
 }
 
 /**
- * Fetches the currently active AI configuration from the database.
- * Returns null if no active config exists.
+ * Fetches an AI configuration from the database.
+ * When `aiConfigId` is provided, that specific config is used if active.
+ * Otherwise the currently active config is returned.
  */
-async function getActiveAiConfig(): Promise<AiProviderConfig | null> {
+async function getAiConfig(aiConfigId?: string | null): Promise<AiProviderConfig | null> {
   try {
-    const configs = await db.select().from(aiConfig).where(eq(aiConfig.isActive, true)).limit(1);
+    const configs = aiConfigId
+      ? await db.select().from(aiConfig).where(eq(aiConfig.id, aiConfigId)).limit(1)
+      : await db.select().from(aiConfig).where(eq(aiConfig.isActive, true)).limit(1);
     if (configs.length === 0) return null;
     const c = configs[0];
     return {
+      id: c.id,
       provider: c.provider || 'gemini',
       modelName: c.modelName || 'gemini-2.5-flash',
       apiKey: c.apiKey,
@@ -126,7 +131,7 @@ async function callGemini(
 // ──────────────────────────────────────────────
 //  Route the call to the correct provider
 // ──────────────────────────────────────────────
-async function callAiProvider(
+export async function callAiProvider(
   config: AiProviderConfig,
   systemInstruction: string,
   messages: ChatMessage[],
@@ -169,9 +174,11 @@ export async function generateAiResponse(
   knowledgeBase: string,
   customerName: string,
   customerNotes: string,
-  chatHistory: ChatMessage[]
+  chatHistory: ChatMessage[],
+  aiName?: string,
+  aiConfigId?: string | null
 ): Promise<{ text: string; tokenCount: number }> {
-  const config = await getActiveAiConfig();
+  const config = await getAiConfig(aiConfigId);
 
   if (!config || !config.apiKey) {
     console.warn('[AI Service] No active AI configuration found. Returning placeholder response.');
@@ -183,7 +190,7 @@ export async function generateAiResponse(
 
   // System Instructions to guide the model behavior
   const systemInstruction = `
-You are an intelligent customer service AI assistant for a business page.
+You are an intelligent customer service AI assistant for a business page. Your name is "${aiName || 'ຜູ້ຊ່ວຍ AI'}". Adopt this identity when communicating with the customer.
 Your job is to answer customer questions politely, naturally, and professionally.
 
 CRITICAL INSTRUCTIONS:
@@ -234,23 +241,14 @@ export async function extractOrderSummary(
     totalPrice: number;
   } | null;
 }> {
-  const config = await getActiveAiConfig();
+  const config = await getAiConfig();
 
   if (!config || !config.apiKey) {
-    console.warn('[AI Service] No active AI configuration found. Returning mock summary.');
+    console.warn('[AI Service] No active AI configuration found. Cannot extract order summary.');
     return {
-      success: true,
-      hasPurchase: true,
-      summary: {
-        customerName: 'ສົມພອນ ສິລິວົງ',
-        phone: '020 77889900',
-        shippingAddress: 'ບ້ານສີຫອມ, ເມືອງຈັນທະບູລີ, ນະຄອນຫຼວງວຽງຈັນ',
-        products: [
-          { name: 'ແຢມສະຕໍເບີຣີອໍແກນິກ', qty: 2, price: 45000 },
-          { name: 'ເຂົ້າຈີ່ຝຣັ່ງ', qty: 1, price: 20000 },
-        ],
-        totalPrice: 110000,
-      },
+      success: false,
+      hasPurchase: false,
+      summary: null,
     };
   }
 

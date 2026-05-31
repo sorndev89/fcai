@@ -1,9 +1,13 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { db } from '../config/db';
-import { users, packages, payments } from '../db/schema';
-import { eq, ne, asc, count, desc, sql } from 'drizzle-orm';
+import { users, packages, payments, pages, bankAccounts, aiConfig, tokenBundles } from '../db/schema';
+import { eq, ne, and, asc, count, desc, sql } from 'drizzle-orm';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import bcrypt from 'bcryptjs';
+import fs from 'fs';
+import path from 'path';
+import { ensureTokenBundlesReady, getAllTokenBundles } from '../utils/token-bundles';
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'fb-chatbot-super-secret-key-12345';
@@ -35,6 +39,25 @@ function requireAdmin(req: AdminRequest, res: Response, next: NextFunction) {
   });
 }
 
+async function resolveActiveAiConfigId() {
+  const activeConfigs = await db.select({ id: aiConfig.id }).from(aiConfig).where(eq(aiConfig.isActive, true)).limit(1);
+  return activeConfigs[0]?.id || null;
+}
+
+async function validateActiveAiConfigId(aiConfigId?: string | null) {
+  if (!aiConfigId) {
+    return resolveActiveAiConfigId();
+  }
+
+  const configs = await db
+    .select({ id: aiConfig.id })
+    .from(aiConfig)
+    .where(eq(aiConfig.id, aiConfigId))
+    .limit(1);
+
+  return configs[0]?.id || null;
+}
+
 // 1. Fetch Tenants list (excludes the admin user itself)
 router.get('/tenants', requireAdmin as any, async (req: any, res: Response) => {
   try {
@@ -46,6 +69,7 @@ router.get('/tenants', requireAdmin as any, async (req: any, res: Response) => {
         role: users.role,
         status: users.status,
         packageId: users.packageId,
+        bonusTokens: users.bonusTokens,
         createdAt: users.createdAt,
       })
       .from(users)
@@ -53,6 +77,232 @@ router.get('/tenants', requireAdmin as any, async (req: any, res: Response) => {
     res.json(tenants);
   } catch (error) {
     console.error('Fetch tenants error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 1.5. Register a New Tenant (Admin only)
+router.post('/tenants', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { name, email, password, packageId, status } = req.body;
+
+    if (!name || !email || !password || !packageId) {
+      return res.status(400).json({ error: 'ກະລຸນາປ້ອນຂໍ້ມູນໃຫ້ຄົບຖ້ວນ' });
+    }
+
+    // Check if email already exists
+    const existing = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    if (existing.length > 0) {
+      return res.status(400).json({ error: 'ອີເມວນີ້ຖືກລົງທະບຽນໃນລະບົບແລ້ວ' });
+    }
+
+    // Verify package exists
+    const targetPkg = await db.select().from(packages).where(eq(packages.id, packageId)).limit(1);
+    if (targetPkg.length === 0) {
+      return res.status(400).json({ error: 'ບໍ່ພົບແພັກເກດທີ່ເລືອກ' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const tenantId = crypto.randomUUID();
+
+    // Create user
+    await db.insert(users).values({
+      id: tenantId,
+      name,
+      email,
+      password: hashedPassword,
+      packageId,
+      status: status || 'approved',
+      role: 'tenant',
+    });
+
+    res.status(201).json({ message: 'ລົງທະບຽນລູກຄ້າໃໝ່ສຳເລັດ', tenantId });
+  } catch (error) {
+    console.error('Create tenant error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 1.8. Update Tenant Details (Admin only)
+router.put('/tenants/:id', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { name, email, password, packageId, status } = req.body;
+
+    // Check if user exists
+    const userResult = await db.select().from(users).where(eq(users.id, id)).limit(1);
+    if (userResult.length === 0) {
+      return res.status(404).json({ error: 'ບໍ່ພົບຜູ້ໃຊ້' });
+    }
+
+    const updateData: Record<string, any> = {};
+    if (name !== undefined) updateData.name = name;
+    if (email !== undefined) {
+      // Check if email duplicate
+      const duplicate = await db.select().from(users).where(and(eq(users.email, email), ne(users.id, id))).limit(1);
+      if (duplicate.length > 0) {
+        return res.status(400).json({ error: 'ອີເມວນີ້ຖືກໃຊ້ໂດຍຜູ້ໃຊ້ອື່ນແລ້ວ' });
+      }
+      updateData.email = email;
+    }
+    if (packageId !== undefined) {
+      // Verify package
+      const targetPkg = await db.select().from(packages).where(eq(packages.id, packageId)).limit(1);
+      if (targetPkg.length === 0) {
+        return res.status(400).json({ error: 'ບໍ່ພົບແພັກເກດທີ່ເລືອກ' });
+      }
+      updateData.packageId = packageId;
+    }
+    if (status !== undefined) {
+      if (!['pending', 'approved', 'suspended'].includes(status)) {
+        return res.status(400).json({ error: 'ສະຖານະບໍ່ຖືກຕ້ອງ' });
+      }
+      updateData.status = status;
+    }
+    if (password && password.trim().length > 0) {
+      updateData.password = await bcrypt.hash(password, 10);
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'ບໍ່ມີຂໍ້ມູນທີ່ຈະອັບເດດ' });
+    }
+
+    await db.update(users).set(updateData).where(eq(users.id, id));
+
+    res.json({ message: 'ອັບເດດຂໍ້ມູນລູກຄ້າສຳເລັດ' });
+  } catch (error) {
+    console.error('Update tenant details error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 1.9. Fetch Pages for a specific tenant (Admin only)
+router.get('/tenants/:userId/pages', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { userId } = req.params;
+    const tenantPages = await db.select().from(pages).where(eq(pages.userId, userId));
+    res.json(tenantPages);
+  } catch (error) {
+    console.error('Fetch tenant pages error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 1.95. Connect a new Page for a specific tenant (Admin only)
+router.post('/tenants/:userId/pages', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { userId } = req.params;
+    const { fbPageId, fbPageName, fbPageAccessToken, knowledgeBase, aiName, aiConfigId } = req.body;
+
+    if (!fbPageId || !fbPageName || !fbPageAccessToken) {
+      return res.status(400).json({ error: 'fbPageId, fbPageName, and fbPageAccessToken are required' });
+    }
+
+    // Check if duplicate
+    const existing = await db.select().from(pages).where(eq(pages.fbPageId, fbPageId)).limit(1);
+    if (existing.length > 0) {
+      return res.status(400).json({ error: 'This Facebook Page is already connected.' });
+    }
+
+    // Check limits
+    const userResult = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (userResult.length > 0) {
+      const user = userResult[0];
+      if (user.role !== 'admin' && user.packageId) {
+        const pkgResult = await db.select().from(packages).where(eq(packages.id, user.packageId)).limit(1);
+        if (pkgResult.length > 0) {
+          const pkg = pkgResult[0];
+          const userPages = await db.select().from(pages).where(eq(pages.userId, userId));
+          if (userPages.length >= pkg.maxPages) {
+            return res.status(400).json({
+              error: `ແພັກເກດຂອງລູກຄ້າ (${pkg.name}) ອະນຸຍາດໃຫ້ເຊື່ອມຕໍ່ໄດ້ສູງສຸດ ${pkg.maxPages} ເພຈ໌.`
+            });
+          }
+        }
+      }
+    }
+
+    const resolvedAiConfigId = await validateActiveAiConfigId(aiConfigId);
+    if (!resolvedAiConfigId) {
+      return res.status(400).json({ error: 'ບໍ່ພົບ AI ທີ່ active. ກະລຸນາເປີດໃຊ້ AI Config ກ່ອນ.' });
+    }
+
+    const newPageId = crypto.randomUUID();
+    await db.insert(pages).values({
+      id: newPageId,
+      userId,
+      fbPageId,
+      fbPageName,
+      fbPageAccessToken,
+      knowledgeBase: knowledgeBase || '',
+      aiName: aiName || 'ຜູ້ຊ່ວຍ AI',
+      aiConfigId: resolvedAiConfigId,
+      isActive: true,
+    });
+
+    res.status(201).json({ message: 'Page connected successfully', id: newPageId });
+  } catch (error) {
+    console.error('Connect tenant page error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 1.96. Update tenant page connection (Admin only)
+router.put('/tenants/:userId/pages/:pageId', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { userId, pageId } = req.params;
+    const { fbPageId, fbPageName, fbPageAccessToken, knowledgeBase, isActive, aiName, aiConfigId } = req.body;
+
+    const pageResult = await db.select().from(pages).where(and(eq(pages.id, pageId), eq(pages.userId, userId))).limit(1);
+    if (pageResult.length === 0) {
+      return res.status(404).json({ error: 'ບໍ່ພົບຂໍ້ມູນການເຊື່ອມຕໍ່ເພຈ' });
+    }
+
+    const updates: Partial<typeof pages.$inferInsert> = {};
+    if (knowledgeBase !== undefined) updates.knowledgeBase = knowledgeBase;
+    if (aiName !== undefined) updates.aiName = aiName;
+    if (isActive !== undefined) updates.isActive = isActive;
+    if (fbPageName !== undefined) updates.fbPageName = fbPageName;
+    if (aiConfigId !== undefined) {
+      const resolvedAiConfigId = await validateActiveAiConfigId(aiConfigId);
+      if (!resolvedAiConfigId) {
+        return res.status(400).json({ error: 'ບໍ່ພົບ AI ທີ່ active. ກະລຸນາເປີດໃຊ້ AI Config ກ່ອນ.' });
+      }
+      updates.aiConfigId = resolvedAiConfigId;
+    }
+    if (fbPageId !== undefined) {
+      if (fbPageId !== pageResult[0].fbPageId) {
+        const existing = await db.select().from(pages).where(eq(pages.fbPageId, fbPageId)).limit(1);
+        if (existing.length > 0) {
+          return res.status(400).json({ error: 'Facebook Page ນີ້ຖືກເຊື່ອມຕໍ່ໄປແລ້ວ.' });
+        }
+      }
+      updates.fbPageId = fbPageId;
+    }
+    if (fbPageAccessToken !== undefined) updates.fbPageAccessToken = fbPageAccessToken;
+
+    await db.update(pages).set(updates).where(eq(pages.id, pageId));
+    res.json({ message: 'Page connection updated successfully' });
+  } catch (error) {
+    console.error('Update tenant page error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 1.97. Delete tenant page connection (Admin only)
+router.delete('/tenants/:userId/pages/:pageId', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { userId, pageId } = req.params;
+    const pageResult = await db.select().from(pages).where(and(eq(pages.id, pageId), eq(pages.userId, userId))).limit(1);
+    if (pageResult.length === 0) {
+      return res.status(404).json({ error: 'ບໍ່ພົບຂໍ້ມູນການເຊື່ອມຕໍ່ເພຈ' });
+    }
+
+    await db.delete(pages).where(eq(pages.id, pageId));
+    res.json({ message: 'Page connection deleted successfully' });
+  } catch (error) {
+    console.error('Delete tenant page error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -144,6 +394,124 @@ router.put('/packages/:id', requireAdmin as any, async (req: any, res: Response)
   }
 });
 
+// 4.5. Fetch Token Top-up Bundles
+router.get('/token-bundles', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const bundles = await getAllTokenBundles();
+    res.json(bundles);
+  } catch (error) {
+    console.error('Fetch token bundles error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 4.6. Create Token Top-up Bundle
+router.post('/token-bundles', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { name, tokenAmount, price, sortOrder = 0, isActive = true } = req.body;
+
+    if (!name || !tokenAmount || price === undefined) {
+      return res.status(400).json({ error: 'Missing token bundle fields' });
+    }
+
+    await ensureTokenBundlesReady();
+    const bundleId = `tok-${crypto.randomBytes(4).toString('hex')}`;
+    await db.insert(tokenBundles).values({
+      id: bundleId,
+      name,
+      tokenAmount: Number(tokenAmount),
+      price: price.toString(),
+      sortOrder: Number(sortOrder || 0),
+      isActive: Boolean(isActive),
+    });
+
+    res.status(201).json({ message: 'Token bundle created successfully', bundleId });
+  } catch (error) {
+    console.error('Create token bundle error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 4.7. Update Token Top-up Bundle
+router.put('/token-bundles/:id', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { name, tokenAmount, price, sortOrder, isActive } = req.body;
+
+    await ensureTokenBundlesReady();
+    const existing = await db.select().from(tokenBundles).where(eq(tokenBundles.id, id)).limit(1);
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Token bundle not found' });
+    }
+
+    const updateData: Record<string, any> = {};
+    if (name !== undefined) updateData.name = name;
+    if (tokenAmount !== undefined) updateData.tokenAmount = Number(tokenAmount);
+    if (price !== undefined) updateData.price = price.toString();
+    if (sortOrder !== undefined) updateData.sortOrder = Number(sortOrder);
+    if (isActive !== undefined) updateData.isActive = Boolean(isActive);
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    await db.update(tokenBundles).set(updateData).where(eq(tokenBundles.id, id));
+    res.json({ message: 'Token bundle updated successfully' });
+  } catch (error) {
+    console.error('Update token bundle error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 4.8. Grant bonus tokens directly to a user
+router.post('/users/:id/bonus-tokens', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { amount } = req.body;
+
+    const tokenAmount = Number(amount || 0);
+    if (!Number.isFinite(tokenAmount) || tokenAmount <= 0) {
+      return res.status(400).json({ error: 'Token amount must be greater than zero' });
+    }
+
+    const userResult = await db.select().from(users).where(eq(users.id, id)).limit(1);
+    if (userResult.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    await db
+      .update(users)
+      .set({ bonusTokens: sql`${users.bonusTokens} + ${tokenAmount}` })
+      .where(eq(users.id, id));
+
+    res.json({ message: 'Bonus tokens added successfully', amount: tokenAmount });
+  } catch (error) {
+    console.error('Grant bonus tokens error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 4.9. Fetch Pending Payments Count
+router.get('/payments/pending-count', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const pendingResult = await db
+      .select({ count: count() })
+      .from(payments)
+      .where(
+        and(
+          eq(payments.status, 'pending'),
+          sql`${payments.slipUrl} IS NOT NULL`,
+          ne(payments.slipUrl, '')
+        )
+      );
+    const countVal = Number(pendingResult[0]?.count || 0);
+    res.json({ count: countVal });
+  } catch (error) {
+    console.error('Fetch pending count error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // 5. Fetch Payments logs
 router.get('/payments', requireAdmin as any, async (req: any, res: Response) => {
   try {
@@ -151,14 +519,33 @@ router.get('/payments', requireAdmin as any, async (req: any, res: Response) => 
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
     const offset = (page - 1) * limit;
 
+    const statusQuery = req.query.status as string | undefined;
+    const excludeStatusQuery = req.query.excludeStatus as string | undefined;
+
+    const conditions = [];
+    if (statusQuery) {
+      conditions.push(eq(payments.status, statusQuery));
+    }
+    if (excludeStatusQuery) {
+      conditions.push(ne(payments.status, excludeStatusQuery));
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
     // Get total count for pagination
-    const totalResult = await db.select({ total: count() }).from(payments);
+    const countQuery = db.select({ total: count() }).from(payments);
+    if (whereClause) {
+      countQuery.where(whereClause);
+    }
+    const totalResult = await countQuery;
     const total = Number(totalResult[0]?.total || 0);
 
     // Fetch paginated payments, newest first
-    const paymentsList = await db
-      .select()
-      .from(payments)
+    const selectQuery = db.select().from(payments);
+    if (whereClause) {
+      selectQuery.where(whereClause);
+    }
+    const paymentsList = await selectQuery
       .orderBy(desc(payments.createdAt))
       .limit(limit)
       .offset(offset);
@@ -194,10 +581,10 @@ router.get('/payments', requireAdmin as any, async (req: any, res: Response) => 
   }
 });
 
-// 6. Log New Payment
+// 6. Log New Payment (supports both package and token top-up)
 router.post('/payments', requireAdmin as any, async (req: any, res: Response) => {
   try {
-    const { userId, amount } = req.body;
+    const { userId, amount, paymentType = 'package', tokenAmount = 0 } = req.body;
 
     if (!userId || !amount) {
       return res.status(400).json({ error: 'Missing payment fields' });
@@ -215,11 +602,21 @@ router.post('/payments', requireAdmin as any, async (req: any, res: Response) =>
       id: paymentId,
       userId,
       packageId: user.packageId || '',
+      paymentType,
+      tokenAmount: Number(tokenAmount || 0),
       amount: amount.toString(),
       status: 'paid',
       recordedBy: req.user?.userId || null,
       paymentDate: new Date(),
     });
+
+    // If it's a token top-up, credit user's bonusTokens immediately
+    if (paymentType === 'token_topup' && Number(tokenAmount) > 0) {
+      await db
+        .update(users)
+        .set({ bonusTokens: sql`${users.bonusTokens} + ${Number(tokenAmount)}` })
+        .where(eq(users.id, userId));
+    }
 
     res.status(201).json({ message: 'Payment recorded successfully', paymentId });
   } catch (error) {
@@ -238,17 +635,187 @@ router.put('/payments/:id/pay', requireAdmin as any, async (req: any, res: Respo
       return res.status(404).json({ error: 'Payment not found' });
     }
 
+    const pay = existing[0];
+    const adminId = req.user?.userId || null;
+
+    // Update payment record
     await db
       .update(payments)
       .set({
         status: 'paid',
         paymentDate: new Date(),
+        recordedBy: adminId,
       })
       .where(eq(payments.id, id));
+
+    if (pay.paymentType === 'token_topup') {
+      await db
+        .update(users)
+        .set({ bonusTokens: sql`${users.bonusTokens} + ${Number(pay.tokenAmount || 0)}` })
+        .where(eq(users.id, pay.userId));
+    } else {
+      // Upgrade the user's package
+      await db
+        .update(users)
+        .set({ packageId: pay.packageId })
+        .where(eq(users.id, pay.userId));
+    }
 
     res.json({ message: 'Payment confirmed successfully' });
   } catch (error) {
     console.error('Confirm payment error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 8. Reject payment
+router.put('/payments/:id/reject', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const existing = await db.select().from(payments).where(eq(payments.id, id)).limit(1);
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    const adminId = req.user?.userId || null;
+
+    await db
+      .update(payments)
+      .set({
+        status: 'rejected',
+        recordedBy: adminId,
+      })
+      .where(eq(payments.id, id));
+
+    res.json({ message: 'Payment rejected successfully' });
+  } catch (error) {
+    console.error('Reject payment error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 9. Fetch all SaaS Bank Accounts
+router.get('/bank-accounts', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const list = await db.select().from(bankAccounts).orderBy(desc(bankAccounts.createdAt));
+    res.json(list);
+  } catch (error) {
+    console.error('Fetch bank accounts error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 10. Create a Bank Account
+router.post('/bank-accounts', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { bankName, accountName, accountNumber, qrCodeBase64, qrCodeName, isActive } = req.body;
+
+    if (!bankName || !accountName || !accountNumber) {
+      return res.status(400).json({ error: 'ກະລຸນາປ້ອນຂໍ້ມູນບັນຊີທະນາຄານໃຫ້ຄົບຖ້ວນ' });
+    }
+
+    let qrCodeUrl = '';
+    if (qrCodeBase64 && qrCodeName) {
+      try {
+        const base64Data = qrCodeBase64.replace(/^data:image\/\w+;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        const uniqueFileName = `${crypto.randomUUID()}-${qrCodeName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+        
+        const uploadDir = path.resolve(__dirname, '../../uploads/banks');
+        if (!fs.existsSync(uploadDir)) {
+          fs.mkdirSync(uploadDir, { recursive: true });
+        }
+
+        const filePath = path.join(uploadDir, uniqueFileName);
+        fs.writeFileSync(filePath, buffer);
+        
+        qrCodeUrl = `/uploads/banks/${uniqueFileName}`;
+      } catch (uploadError) {
+        console.error('QR code upload write error:', uploadError);
+        return res.status(500).json({ error: 'ເກີດຂໍ້ຜິດພາດໃນການບັນທຶກຮູບພາບ QR Code' });
+      }
+    }
+
+    const accountId = crypto.randomUUID();
+    await db.insert(bankAccounts).values({
+      id: accountId,
+      bankName,
+      accountName,
+      accountNumber,
+      qrCodeUrl,
+      isActive: isActive !== undefined ? isActive : true,
+    });
+
+    res.status(201).json({ message: 'ເພີ່ມບັນຊີທະນາຄານສຳເລັດ', id: accountId });
+  } catch (error) {
+    console.error('Create bank account error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 11. Update a Bank Account
+router.put('/bank-accounts/:id', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { bankName, accountName, accountNumber, qrCodeBase64, qrCodeName, isActive } = req.body;
+
+    const existing = await db.select().from(bankAccounts).where(eq(bankAccounts.id, id)).limit(1);
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'ບໍ່ພົບຂໍ້ມູນບັນຊີທະນາຄານ' });
+    }
+
+    const updates: Partial<typeof bankAccounts.$inferInsert> = {};
+    if (bankName !== undefined) updates.bankName = bankName;
+    if (accountName !== undefined) updates.accountName = accountName;
+    if (accountNumber !== undefined) updates.accountNumber = accountNumber;
+    if (isActive !== undefined) updates.isActive = isActive;
+
+    if (qrCodeBase64 && qrCodeName) {
+      try {
+        const base64Data = qrCodeBase64.replace(/^data:image\/\w+;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        const uniqueFileName = `${crypto.randomUUID()}-${qrCodeName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+        
+        const uploadDir = path.resolve(__dirname, '../../uploads/banks');
+        if (!fs.existsSync(uploadDir)) {
+          fs.mkdirSync(uploadDir, { recursive: true });
+        }
+
+        const filePath = path.join(uploadDir, uniqueFileName);
+        fs.writeFileSync(filePath, buffer);
+        
+        updates.qrCodeUrl = `/uploads/banks/${uniqueFileName}`;
+      } catch (uploadError) {
+        console.error('QR code upload write error:', uploadError);
+        return res.status(500).json({ error: 'ເກີດຂໍ້ຜິດພາດໃນການບັນທຶກຮູບພາບ QR Code' });
+      }
+    }
+
+    await db.update(bankAccounts).set(updates).where(eq(bankAccounts.id, id));
+
+    res.json({ message: 'ອັບເດດຂໍ້ມູນບັນຊີທະນາຄານສຳເລັດ' });
+  } catch (error) {
+    console.error('Update bank account error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 12. Delete a Bank Account
+router.delete('/bank-accounts/:id', requireAdmin as any, async (req: any, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const existing = await db.select().from(bankAccounts).where(eq(bankAccounts.id, id)).limit(1);
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'ບໍ່ພົບຂໍ້ມູນບັນຊີທະນາຄານ' });
+    }
+
+    await db.delete(bankAccounts).where(eq(bankAccounts.id, id));
+
+    res.json({ message: 'ລຶບບັນຊີທະນາຄານສຳເລັດ' });
+  } catch (error) {
+    console.error('Delete bank account error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

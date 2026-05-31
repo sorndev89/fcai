@@ -63,7 +63,7 @@ router.post('/register', async (req, res) => {
 
     res.status(201).json({
       message: 'ລົງທະບຽນສຳເລັດ! ກະລຸນາລໍຖ້າການອານຸມັດບັນຊີຈາກຜູ້ດູແລລະບົບ (SaaS Admin)',
-      user: { id: userId, email, name, role: 'tenant', status: 'pending' },
+      user: { id: userId, email, name, role: 'tenant', status: 'pending', bonusTokens: 0 },
     });
   } catch (error) {
     console.error('Registration error:', error);
@@ -74,7 +74,7 @@ router.post('/register', async (req, res) => {
 // Login User
 router.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, remember } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ error: 'ກະລຸນາປ້ອນອີເມວ ແລະ ລະຫັດຜ່ານ' });
@@ -108,13 +108,13 @@ router.post('/login', async (req, res) => {
     const token = jwt.sign(
       { userId: user.id, email: user.email, name: user.name, role: user.role },
       JWT_SECRET,
-      { expiresIn: '7d' }
+      { expiresIn: remember ? '30d' : '5d' }
     );
 
     res.json({
       message: 'ເຂົ້າສູ່ລະບົບສຳເລັດ',
       token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role, status: user.status, packageId: user.packageId },
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, status: user.status, packageId: user.packageId, bonusTokens: user.bonusTokens ?? 0 },
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -143,6 +143,7 @@ router.get('/me', authenticateToken as any, async (req: AuthenticatedRequest, re
       role: user.role,
       status: user.status,
       packageId: user.packageId,
+      bonusTokens: user.bonusTokens ?? 0,
     });
   } catch (error) {
     console.error('Get profile error:', error);
@@ -184,4 +185,3 @@ router.put('/upgrade', authenticateToken as any, async (req: AuthenticatedReques
 });
 
 export default router;
-

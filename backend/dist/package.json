@@ -1,0 +1,11 @@
+{
+  "name": "facebook-chat-ai-production",
+  "version": "1.0.0",
+  "description": "Production self-contained build of Facebook Chat AI",
+  "main": "index.cjs",
+  "scripts": {
+    "start": "node index.cjs",
+    "db:migrate": "node migrate.cjs",
+    "db:seed": "node seed.cjs"
+  }
+}
