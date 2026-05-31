@@ -1,1 +1,0 @@
-import{p as a,M as n,h as s,B as o,V as t}from"./BEJ2V4l8.js";const l=a({__name:"AppSkeletonBlock",props:{as:{default:"div"},rounded:{default:"rounded-xl"}},setup(e){return(c,r)=>(n(),s(t(e.as),{class:o(["animate-pulse bg-slate-200/80 dark:bg-slate-800/80",e.rounded])},null,8,["class"]))}}),d=Object.assign(l,{__name:"AppSkeletonBlock"});export{d as _};
