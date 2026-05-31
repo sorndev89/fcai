@@ -54,6 +54,7 @@ export default defineNuxtConfig({
   typescript: {
     tsConfig: {
       compilerOptions: {
+        module: 'ESNext',
         types: ['@pinia/nuxt'],
       },
       include: ['../app/types/**/*.d.ts'],

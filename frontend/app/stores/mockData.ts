@@ -86,8 +86,8 @@ export const useMockStore = defineStore('mockData', () => {
   const defaultUsers: MockUser[] = [
     {
       id: 'admin-user-id',
-      email: 'admin@saas.com',
-      name: 'SaaS Owner (ແອດມິນ)',
+      email: 'admin@fcai.com',
+      name: 'ຜູ້ດູແລລະບົບ (ແອດມິນ)',
       role: 'admin',
       status: 'approved',
       packageId: '',
@@ -548,7 +548,7 @@ export const useMockStore = defineStore('mockData', () => {
     simulateAiReply,
     simulateAiOrderSummary,
     
-    // SaaS Admin additions
+    // Admin additions
     getTenants,
     updateTenantStatus,
     getPackages,

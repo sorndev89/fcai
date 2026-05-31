@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { LayoutDashboard, MessageSquare, BookOpen, Package } from 'lucide-vue-next';
+import { LayoutDashboard, MessageSquare, BookOpen, Package, Receipt } from 'lucide-vue-next';
 import { useAuthStore } from '~/stores/auth';
 
 const authStore = useAuthStore();
@@ -9,6 +9,7 @@ const sidebarLinks = [
   { to: '/dashboard', label: 'ໜ້າຫຼັກ', icon: LayoutDashboard },
   { to: '/dashboard/pages', label: 'ເພຈ໌', icon: MessageSquare },
   { to: '/dashboard/packages', label: 'ແພັກເກດ', icon: Package },
+  { to: '/dashboard/billing', label: 'ປະຫວັດການຊື້', icon: Receipt },
   { to: '/dashboard/ai-training-guide', label: 'ຄູ່ມືຝຶກສອນ AI', icon: BookOpen },
 ];
 
@@ -42,18 +43,27 @@ watch(
 <template>
   <div class="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
     <!-- Header Component -->
+    <AppLandingHeader v-if="route.path === '/'" />
     <AppHeader
+      v-else
       brand-label="AI ສົນທະນາ Facebook"
       brand-link="/dashboard"
       :show-admin-link="true"
       admin-link-to="/admin"
       admin-link-label="ຈັດການລະບົບ"
       variant="default"
+      :sticky="route.path !== '/'"
       @toggle-sidebar="toggleSidebar"
     />
 
     <!-- Main Layout: Sidebar + Content -->
-    <div class="mx-auto flex max-w-7xl">
+    <div
+      :class="[
+        route.path === '/'
+          ? 'mx-auto w-full pt-18'
+          : 'mx-auto flex w-full max-w-[1600px] gap-6 px-4 sm:px-6 lg:px-8 pt-16',
+      ]"
+    >
       <!-- Sidebar (only for authenticated users) -->
       <AppSidebar
         v-if="authStore.isAuthenticated"
@@ -66,7 +76,7 @@ watch(
 
       <!-- Main Content -->
       <main
-        class="flex-1 px-4 py-6 sm:px-6 lg:px-8"
+        class="flex-1 py-6"
         :class="authStore.isAuthenticated ? 'min-h-[calc(100vh-8rem)]' : 'min-h-[calc(100vh-8rem)]'"
       >
         <slot />

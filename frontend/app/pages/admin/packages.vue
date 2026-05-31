@@ -1,12 +1,10 @@
 <script setup lang="ts">
-import { useMockStore } from '~/stores/mockData';
 import { useAuthStore } from '~/stores/auth';
 
 definePageMeta({
   layout: 'admin',
 });
 
-const mockStore = useMockStore();
 const authStore = useAuthStore();
 const apiUrl = useApiUrl();
 const packagesList = ref<any[]>([]);
@@ -19,7 +17,6 @@ const maxTokens = ref(10000);
 const price = ref('0.00');
 const error = ref('');
 const success = ref('');
-const isMockMode = ref(false);
 
 // Edit form state
 const showEditModal = ref(false);
@@ -51,15 +48,8 @@ async function loadPackages() {
     const data = await $fetch<any[]>(`${apiUrl}/api/admin/packages`, { headers: headers.value });
     packagesList.value = Array.isArray(data) ? data : [];
   } catch (err) {
-    console.warn('[Admin Packages] Cannot fetch from API, using mock.', err);
-    isMockMode.value = true;
-    mockStore.initStore();
-    // Sort mock packages by price ascending (cheapest first)
-    packagesList.value = [...mockStore.getPackages()].sort((a, b) => {
-      const priceA = parseFloat(String(a.price).replace(/,/g, ''));
-      const priceB = parseFloat(String(b.price).replace(/,/g, ''));
-      return priceA - priceB;
-    });
+    console.error('[Admin Packages] Cannot fetch packages:', err);
+    packagesList.value = [];
   }
 }
 
@@ -76,21 +66,16 @@ async function handleCreatePackage() {
   error.value = '';
   
   try {
-    if (isMockMode.value) {
-      const priceFormatted = parseFloat(price.value.replace(/,/g, '')).toLocaleString('lo-LA');
-      mockStore.addPackage(name.value, maxPages.value, maxTokens.value, priceFormatted);
-    } else {
-      await $fetch(`${apiUrl}/api/admin/packages`, {
-        method: 'POST',
-        headers: headers.value,
-        body: {
-          name: name.value,
-          maxPages: maxPages.value,
-          maxTokens: maxTokens.value,
-          price: price.value,
-        },
-      });
-    }
+    await $fetch(`${apiUrl}/api/admin/packages`, {
+      method: 'POST',
+      headers: headers.value,
+      body: {
+        name: name.value,
+        maxPages: maxPages.value,
+        maxTokens: maxTokens.value,
+        price: price.value,
+      },
+    });
     
     // Clear inputs
     name.value = '';
@@ -135,31 +120,17 @@ async function handleEditPackage() {
   editSaving.value = true;
 
   try {
-    if (isMockMode.value) {
-      const idx = packagesList.value.findIndex((p) => p.id === editingPackage.value.id);
-      if (idx !== -1) {
-        packagesList.value[idx] = {
-          ...packagesList.value[idx],
-          name: editName.value,
-          maxPages: editMaxPages.value,
-          maxTokens: editMaxTokens.value,
-          price: parseFloat(editPrice.value.replace(/,/g, '')).toLocaleString('lo-LA'),
-          isActive: editIsActive.value,
-        };
-      }
-    } else {
-      await $fetch(`${apiUrl}/api/admin/packages/${editingPackage.value.id}`, {
-        method: 'PUT',
-        headers: headers.value,
-        body: {
-          name: editName.value,
-          maxPages: editMaxPages.value,
-          maxTokens: editMaxTokens.value,
-          price: editPrice.value,
-          isActive: editIsActive.value,
-        },
-      });
-    }
+    await $fetch(`${apiUrl}/api/admin/packages/${editingPackage.value.id}`, {
+      method: 'PUT',
+      headers: headers.value,
+      body: {
+        name: editName.value,
+        maxPages: editMaxPages.value,
+        maxTokens: editMaxTokens.value,
+        price: editPrice.value,
+        isActive: editIsActive.value,
+      },
+    });
 
     success.value = 'ອັບເດດແພັກເກດສຳເລັດ!';
     setTimeout(() => (success.value = ''), 3000);

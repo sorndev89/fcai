@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Bot, ChevronDown, LogIn, LogOut, Menu, Moon, Shield, Sun, User } from 'lucide-vue-next';
+import { BookOpen, Bot, ChevronDown, CreditCard, LayoutDashboard, LogIn, LogOut, Menu, MessageSquare, Moon, Package, Settings, Shield, Sun, User, Users } from 'lucide-vue-next';
 import { useAuthStore } from '~/stores/auth';
 
 const props = withDefaults(defineProps<{
@@ -9,6 +9,7 @@ const props = withDefaults(defineProps<{
   adminLinkTo?: string;
   adminLinkLabel?: string;
   variant?: 'default' | 'admin';
+  sticky?: boolean;
 }>(), {
   brandLabel: 'AI ສົນທະນາ Facebook',
   brandLink: '/dashboard',
@@ -16,6 +17,7 @@ const props = withDefaults(defineProps<{
   adminLinkTo: '/admin',
   adminLinkLabel: 'ຈັດການລະບົບ',
   variant: 'default',
+  sticky: true,
 });
 
 const emit = defineEmits<{
@@ -26,6 +28,21 @@ const authStore = useAuthStore();
 const isDark = ref(false);
 const userMenuOpen = ref(false);
 const userMenuRef = ref<HTMLElement | null>(null);
+
+const userMenuItems = computed(() => [
+  { to: '/dashboard', label: 'ໜ້າຫຼັກ', icon: LayoutDashboard },
+  { to: '/dashboard/pages', label: 'ເພຈ໌', icon: MessageSquare },
+  { to: '/dashboard/packages', label: 'ແພັກເກດ', icon: Package },
+  { to: '/dashboard/ai-training-guide', label: 'ຄູ່ມືຝຶກສອນ AI', icon: BookOpen },
+]);
+
+const adminMenuItems = computed(() => authStore.isAdmin ? [
+  { to: '/admin', label: 'ແດດຊບອດ', icon: LayoutDashboard },
+  { to: '/admin/tenants', label: 'ລູກຄ້າ', icon: Users },
+  { to: '/admin/packages', label: 'ແພັກເກດ', icon: Package },
+  { to: '/admin/billing', label: 'ບິນ', icon: CreditCard },
+  { to: '/admin/ai-config', label: 'AI Config', icon: Settings },
+] : []);
 
 function handleLogout() {
   userMenuOpen.value = false;
@@ -66,13 +83,19 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <header class="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur dark:border-slate-800 dark:bg-slate-950/90">
-    <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+  <header 
+    :class="[
+      sticky ? 'fixed inset-x-0 top-0 z-50' : 'relative z-40',
+      'border-b border-slate-200 bg-white/95 backdrop-blur dark:border-slate-800 dark:bg-slate-950/90'
+    ]"
+  >
+    <div class="mx-auto flex h-16 max-w-[1600px] items-center justify-between px-4 sm:px-6 lg:px-8">
       <!-- Left: Sidebar toggle (mobile) + Logo -->
       <div class="flex items-center gap-3">
-        <!-- Sidebar toggle for desktop -->
+        <!-- Sidebar toggle -->
         <button
-          class="hidden h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200 lg:inline-flex"
+          v-if="authStore.isAuthenticated"
+          class="flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
           type="button"
           title="ເປີດ/ປິດເມນູ"
           @click="emit('toggleSidebar')"
@@ -89,7 +112,7 @@ onBeforeUnmount(() => {
           </span>
           <div class="min-w-0">
             <span class="block truncate text-base font-bold">{{ brandLabel }}</span>
-            <span v-if="variant === 'admin'" class="block text-xs text-slate-500 dark:text-slate-400">ພື້ນທີ່ເຮັດວຽກຂອງເຈົ້າຂອງລະບົບ</span>
+            <span v-if="variant === 'admin'" class="hidden sm:block text-xs text-slate-500 dark:text-slate-400">ພື້ນທີ່ເຮັດວຽກຂອງເຈົ້າຂອງລະບົບ</span>
           </div>
         </NuxtLink>
       </div>
@@ -132,7 +155,7 @@ onBeforeUnmount(() => {
           >
             <div
               v-if="userMenuOpen"
-              class="absolute right-0 top-full z-50 mt-2 w-60 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900"
+              class="absolute right-0 top-full z-50 mt-2 w-72 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900"
             >
               <!-- User Info Header -->
               <div class="border-b border-slate-100 p-4 dark:border-slate-800">
@@ -153,29 +176,47 @@ onBeforeUnmount(() => {
 
               <!-- Menu Items -->
               <div class="p-2">
-                <!-- Dashboard link -->
-                <NuxtLink
-                  to="/dashboard"
-                  class="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-slate-600 transition-all hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
-                  @click="userMenuOpen = false"
-                >
-                  <User class="h-4 w-4" />
-                  ໜ້າຫຼັກ
-                </NuxtLink>
+                <div class="px-3 pb-2 pt-1 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+                  User Menu
+                </div>
 
-                <!-- Admin link (admin only) -->
-                <NuxtLink
+                <div class="space-y-1">
+                  <NuxtLink
+                    v-for="item in userMenuItems"
+                    :key="item.to"
+                    :to="item.to"
+                    class="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-slate-600 transition-all hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+                    @click="userMenuOpen = false"
+                  >
+                    <component :is="item.icon" class="h-4 w-4" />
+                    {{ item.label }}
+                  </NuxtLink>
+                </div>
+
+                <div
                   v-if="authStore.isAdmin"
-                  :to="adminLinkTo"
-                  class="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-slate-600 transition-all hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
-                  @click="userMenuOpen = false"
+                  class="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800"
                 >
-                  <Shield class="h-4 w-4" />
-                  {{ adminLinkLabel }}
-                </NuxtLink>
+                  <div class="px-3 pb-2 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+                    Admin Menu
+                  </div>
+
+                  <div class="space-y-1">
+                    <NuxtLink
+                      v-for="item in adminMenuItems"
+                      :key="item.to"
+                      :to="item.to"
+                      class="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-slate-600 transition-all hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+                      @click="userMenuOpen = false"
+                    >
+                      <component :is="item.icon" class="h-4 w-4" />
+                      {{ item.label }}
+                    </NuxtLink>
+                  </div>
+                </div>
 
                 <!-- Divider -->
-                <div class="my-1 border-t border-slate-100 dark:border-slate-800" />
+                <div class="my-3 border-t border-slate-100 dark:border-slate-800" />
 
                 <!-- Logout -->
                 <button

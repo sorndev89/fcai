@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import {
-  Bot, CheckCircle2, Database, MessageSquare, Plus, Settings, Trash2, TrendingUp, Users, Zap,
+  Bot, CheckCircle2, Database, MessageSquare, Plus, Trash2, TrendingUp, Users, Zap,
 } from 'lucide-vue-next';
 import { useAuthStore } from '~/stores/auth';
-import { useMockStore } from '~/stores/mockData';
 import type { ChartDataset } from '~/components/AppLineChart.vue';
 
 definePageMeta({
@@ -12,21 +11,14 @@ definePageMeta({
 });
 
 const authStore = useAuthStore();
-const mockStore = useMockStore();
 const apiUrl = useApiUrl();
 const dialog = useDialog();
 
 const pagesList = ref<any[]>([]);
-const loading = ref(false);
+const loading = ref(true);
 const error = ref('');
-const isMockMode = ref(false);
 
-const showAddForm = ref(false);
-const fbPageId = ref('');
-const fbPageName = ref('');
-const fbPageAccessToken = ref('');
-const formError = ref('');
-const formLoading = ref(false);
+
 
 const headers = computed(() => ({
   Authorization: `Bearer ${authStore.token}`,
@@ -40,69 +32,120 @@ const customerGrowthCount = ref(0);
 
 // ─── Derived Metrics ─────────────────────────────────────
 const activePackage = computed(() => {
-  const pkgs = packagesList.value.length > 0 ? packagesList.value : mockStore.getPackages();
-  const user = mockStore.getTenants().find((t) => t.id === authStore.user?.id) || authStore.user;
+  const user = authStore.user;
   const pkgId = (user as any)?.packageId || 'pkg-starter';
-  return pkgs.find((pkg: any) => pkg.id === pkgId) || pkgs[0];
+  return packagesList.value.find((pkg: any) => pkg.id === pkgId) || packagesList.value[0];
+});
+
+const bonusTokens = computed(() => Number(usageData.value?.bonusTokens ?? authStore.user?.bonusTokens ?? 0));
+
+const effectiveTokenLimit = computed(() => {
+  if (!activePackage.value) return 0;
+  return Number(activePackage.value.maxTokens || 0) + bonusTokens.value;
 });
 
 const tokensUsed = computed(() => {
-  if (usageData.value) return usageData.value.totalTokens || 0;
-  const user = mockStore.getTenants().find((t) => t.id === authStore.user?.id);
-  return user?.tokensUsed || 0;
+  return usageData.value?.totalTokens || 0;
 });
 
 const tokenPercentage = computed(() => {
   if (!activePackage.value) return 0;
-  return Math.min(100, Math.round((tokensUsed.value / activePackage.value.maxTokens) * 100));
+  return Math.min(100, Math.round((tokensUsed.value / (effectiveTokenLimit.value || 1)) * 100));
 });
 
 const activePages = computed(() => pagesList.value.filter((p) => p.isActive).length);
-const totalCustomers = computed(() => totalCustomersCount.value || mockStore.getCustomers().length);
+const totalCustomers = computed(() => totalCustomersCount.value);
 
 // ─── Chart Data ──────────────────────────────────────────
-function generateDailyData(days: number, base: number, variance: number, seed = 1): { label: string; value: number }[] {
-  const result: { label: string; value: number }[] = [];
+const conversationChartData = computed<ChartDataset[]>(() => {
+  const dailyStats = usageData.value?.dailyStats || [];
+  const statsMap = new Map<string, { conversations: number; tokens: number }>();
+  dailyStats.forEach((s: any) => {
+    statsMap.set(s.date, {
+      conversations: Number(s.conversations || 0),
+      tokens: Number(s.tokens || 0)
+    });
+  });
+
+  const conversationData: { label: string; value: number }[] = [];
+  const resolvedData: { label: string; value: number }[] = [];
+
   const now = new Date();
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(now.getDate() - i);
+    
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const key = `${yyyy}-${mm}-${dd}`;
+    
     const label = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    const noise = Math.sin((i + seed) * 1.2) * variance + (Math.random() - 0.5) * variance * 0.4;
-    result.push({ label, value: Math.round(Math.max(0, base + noise)) });
+    const stat = statsMap.get(key) || { conversations: 0, tokens: 0 };
+    
+    conversationData.push({
+      label,
+      value: stat.conversations
+    });
+    resolvedData.push({
+      label,
+      value: stat.conversations
+    });
   }
-  return result;
-}
 
-const conversationChartData = computed<ChartDataset[]>(() => [
-  {
-    label: 'Conversations',
-    data: generateDailyData(7, 24, 12, 1),
-    color: '#0ea5e9',
-  },
-  {
-    label: 'Resolved',
-    data: generateDailyData(7, 18, 10, 3),
-    color: '#10b981',
-  },
-]);
+  return [
+    {
+      label: 'Conversations',
+      data: conversationData,
+      color: '#0ea5e9',
+    },
+    {
+      label: 'Resolved',
+      data: resolvedData,
+      color: '#10b981',
+    },
+  ];
+});
 
-const tokenChartData = computed<ChartDataset[]>(() => [
-  {
-    label: 'Tokens Used',
-    data: generateDailyData(7, 3200, 1500, 5),
-    color: '#8b5cf6',
-  },
-]);
+const tokenChartData = computed<ChartDataset[]>(() => {
+  const dailyStats = usageData.value?.dailyStats || [];
+  const statsMap = new Map<string, number>();
+  dailyStats.forEach((s: any) => {
+    statsMap.set(s.date, Number(s.tokens || 0));
+  });
+
+  const tokenData: { label: string; value: number }[] = [];
+
+  const now = new Date();
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(now.getDate() - i);
+    
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const key = `${yyyy}-${mm}-${dd}`;
+    
+    const label = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const tokens = statsMap.get(key) || 0;
+    
+    tokenData.push({
+      label,
+      value: tokens
+    });
+  }
+
+  return [
+    {
+      label: 'Tokens Used',
+      data: tokenData,
+      color: '#8b5cf6',
+    },
+  ];
+});
 
 const customerGrowth = computed(() => {
-  if (customerGrowthCount.value > 0) return customerGrowthCount.value;
-  const all = mockStore.getCustomers();
-  const recent = all.filter((c) => {
-    const created = new Date(c.createdAt).getTime();
-    return Date.now() - created < 7 * 24 * 60 * 60 * 1000;
-  });
-  return recent.length;
+  return customerGrowthCount.value;
 });
 
 const totalMessagesToday = computed(() => {
@@ -116,115 +159,20 @@ const activeConversations = computed(() => {
   return data.reduce((sum, d) => sum + d.value, 0);
 });
 
-// ─── Page Management ──────────────────────────────────────
-function resetForm() {
-  fbPageId.value = '';
-  fbPageName.value = '';
-  fbPageAccessToken.value = '';
-  formError.value = '';
-}
-
 async function fetchPages() {
-  loading.value = true;
   error.value = '';
-
-  if (isMockMode.value || authStore.token?.startsWith('mock')) {
-    isMockMode.value = true;
-    pagesList.value = mockStore.getPages();
-    loading.value = false;
-    return;
-  }
 
   try {
     pagesList.value = await $fetch<any[]>(`${apiUrl}/api/pages`, {
       headers: headers.value,
     });
-  } catch (err) {
-    console.warn('Backend unavailable. Using mock data.', err);
-    isMockMode.value = true;
-    pagesList.value = mockStore.getPages();
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function handleConnectPage() {
-  if (!fbPageId.value || !fbPageName.value || !fbPageAccessToken.value) {
-    formError.value = 'ກະລຸນາປ້ອນຂໍ້ມູນໃຫ້ຄົບທຸກຊ່ອງ.';
-    return;
-  }
-
-  if (!activePackage.value) return;
-  if (pagesList.value.length >= activePackage.value.maxPages) {
-    formError.value = `ແພັກເກດ ${activePackage.value.name} ເຊື່ອມຕໍ່ໄດ້ສູງສຸດ ${activePackage.value.maxPages} ເພຈ.`;
-    return;
-  }
-
-  formError.value = '';
-  formLoading.value = true;
-
-  try {
-    if (isMockMode.value) {
-      mockStore.addPage(fbPageId.value, fbPageName.value, fbPageAccessToken.value);
-    } else {
-      await $fetch(`${apiUrl}/api/pages`, {
-        method: 'POST',
-        headers: headers.value,
-        body: { fbPageId: fbPageId.value, fbPageName: fbPageName.value, fbPageAccessToken: fbPageAccessToken.value },
-      });
-    }
-    resetForm();
-    showAddForm.value = false;
-    await fetchPages();
-    await dialog.success('ເຊື່ອມຕໍ່ເພຈສຳເລັດ', 'ທ່ານສາມາດເຂົ້າໄປກຳນົດ knowledge base ແລະທົດສອບ bot ໄດ້ແລ້ວ.');
   } catch (err: any) {
-    console.error('Connect page error:', err);
-    formError.value = err.data?.error || 'ບໍ່ສາມາດເຊື່ອມຕໍ່ເພຈໄດ້.';
-  } finally {
-    formLoading.value = false;
-  }
-}
-
-async function togglePageActive(page: any) {
-  const nextStatus = !page.isActive;
-  try {
-    if (isMockMode.value) {
-      mockStore.updatePage(page.id, { isActive: nextStatus });
-    } else {
-      await $fetch(`${apiUrl}/api/pages/${page.id}`, {
-        method: 'PUT',
-        headers: headers.value,
-        body: { isActive: nextStatus },
-      });
-    }
-    page.isActive = nextStatus;
-  } catch (err) {
-    await dialog.error('ອັບເດດສະຖານະບໍ່ສຳເລັດ', 'ກະລຸນາລອງໃໝ່ ຫຼືກວດສອບການເຊື່ອມຕໍ່ backend.');
-  }
-}
-
-async function handleDeletePage(pageId: string) {
-  const confirmed = await dialog.warning({
-    title: 'ຢືນຢັນການລຶບເພຈ',
-    message: 'ການລຶບນີ້ຈະຕັດການເຊື່ອມຕໍ່ Facebook Page ແລະຂໍ້ມູນທີ່ຜູກກັບເພຈນີ້.',
-    confirmLabel: 'ລຶບເພຈ',
-    cancelLabel: 'ຍົກເລີກ',
-  });
-  if (!confirmed) return;
-  try {
-    if (isMockMode.value) {
-      mockStore.deletePage(pageId);
-    } else {
-      await $fetch(`${apiUrl}/api/pages/${pageId}`, { method: 'DELETE', headers: headers.value });
-    }
-    pagesList.value = pagesList.value.filter((page) => page.id !== pageId);
-  } catch (err) {
-    await dialog.error('ລຶບເພຈບໍ່ສຳເລັດ', 'ກະລຸນາລອງໃໝ່ອີກຄັ້ງ.');
+    console.error('Error fetching pages:', err);
+    error.value = err.data?.error || 'ບໍ່ສາມາດໂຫຼດຂໍ້ມູນເພຈ໌ໄດ້';
   }
 }
 
 async function fetchUsageData() {
-  if (isMockMode.value || authStore.token?.startsWith('mock')) return;
   try {
     const data = await $fetch<any>(`${apiUrl}/api/usage/my`, { headers: headers.value });
     usageData.value = data;
@@ -245,7 +193,7 @@ async function fetchPackages() {
 }
 
 async function fetchCustomersCount() {
-  if (isMockMode.value || pagesList.value.length === 0) return;
+  if (pagesList.value.length === 0) return;
   try {
     let total = 0;
     let recent = 0;
@@ -267,30 +215,82 @@ async function fetchCustomersCount() {
   }
 }
 
+async function loadDashboard() {
+  loading.value = true;
+  await fetchPages();
+  await Promise.allSettled([
+    fetchPackages(),
+    fetchUsageData(),
+  ]);
+  await fetchCustomersCount();
+  loading.value = false;
+}
+
 onMounted(() => {
-  fetchPages();
-  fetchPackages();
-  fetchUsageData();
+  loadDashboard();
 });
 </script>
 
 <template>
-  <div class="space-y-6">
-    <!-- ═══════════════ HEADER ═══════════════ -->
-    <section class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-      <div>
-        <p class="app-kicker">ພາບລວມແດດຊບອດ</p>
-        <h1 class="mt-1 text-2xl font-bold text-slate-950 dark:text-white">ແດດຊບອດ AI Chatbot</h1>
-        <p class="mt-1 max-w-2xl text-sm text-slate-600 dark:text-slate-400">
-          ຕິດຕາມສະຖິຕິການໃຊ້ງານ, ກວດສອບ token ແລະຈັດການເພຈ Facebook ຂອງທ່ານ.
-        </p>
+  <div v-if="loading" class="space-y-6">
+    <div class="relative overflow-hidden rounded-2xl border border-sky-100/60 bg-white p-6 shadow-sm dark:border-sky-950/40 dark:bg-slate-900/40">
+      <div class="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
+        <div class="space-y-3">
+          <AppSkeletonBlock class="h-3 w-40" />
+          <AppSkeletonBlock class="h-8 w-80 max-w-full" />
+          <AppSkeletonBlock class="h-4 w-[34rem] max-w-full" />
+        </div>
+        <AppSkeletonBlock class="h-10 w-48 rounded-xl" />
       </div>
+    </div>
 
-      <button class="app-btn-primary w-full sm:w-auto" type="button" @click="showAddForm = true">
-        <Plus class="h-4 w-4" />
-        ເຊື່ອມຕໍ່ເພຈໃໝ່
-      </button>
+    <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <AppSkeletonBlock v-for="n in 4" :key="n" class="h-32 rounded-2xl" />
     </section>
+
+    <section class="grid gap-6 lg:grid-cols-2">
+      <AppSkeletonBlock v-for="n in 2" :key="n" class="h-[320px] rounded-2xl" />
+    </section>
+
+    <section class="grid gap-4 sm:grid-cols-3">
+      <AppSkeletonBlock v-for="n in 3" :key="n" class="h-24 rounded-2xl" />
+    </section>
+  </div>
+
+  <div v-else class="space-y-6">
+    <!-- ═══════════════ HEADER / AI BANNER ═══════════════ -->
+    <div class="relative overflow-hidden rounded-2xl border border-sky-100/60 bg-gradient-to-r from-sky-500/10 via-indigo-500/5 to-transparent p-6 dark:border-sky-950/40 dark:from-sky-950/20 dark:to-transparent">
+      <!-- Glow effect decorative -->
+      <div class="absolute -right-10 -top-10 h-40 w-40 rounded-full bg-sky-500/15 blur-2xl dark:bg-sky-500/10"></div>
+      <div class="absolute -left-10 -bottom-10 h-40 w-40 rounded-full bg-indigo-500/10 blur-2xl dark:bg-indigo-500/5"></div>
+      
+      <div class="relative z-10 flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
+        <div class="flex items-start gap-4">
+          <div class="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-sky-500 text-white shadow-lg shadow-sky-500/30 dark:bg-sky-500 dark:shadow-sky-500/20">
+            <Bot class="h-6 w-6 animate-pulse" />
+          </div>
+          <div>
+            <p class="text-xs font-bold uppercase tracking-widest text-sky-600 dark:text-sky-400">ລະບົບຈັດການອັດສະລິຍະ</p>
+            <h1 class="mt-1 text-2xl font-black text-slate-900 dark:text-white">
+              ແດດຊບອດ <span class="bg-gradient-to-r from-sky-500 to-indigo-500 bg-clip-text text-transparent">FCAI Chatbot</span>
+            </h1>
+            <p class="mt-1.5 max-w-2xl text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+              ຕິດຕາມການໃຊ້ງານ AI ວິເຄາະຂໍ້ຄວາມ ແລະ ສະຖິຕິຂອງລູກຄ້າທີ່ເຊື່ອມຕໍ່ກັບເພຈ Facebook ຂອງທ່ານໄດ້ແບບຮຽວທາມ (Real-time).
+            </p>
+          </div>
+        </div>
+        
+        <div class="flex shrink-0 flex-col sm:flex-row gap-3">
+          <NuxtLink 
+            to="/dashboard/pages" 
+            class="app-btn-primary text-center justify-center shadow-md shadow-sky-500/20"
+          >
+            <MessageSquare class="h-4.5 w-4.5" />
+            <span>ຈັດການເພຈ໌ Facebook</span>
+          </NuxtLink>
+        </div>
+      </div>
+    </div>
 
     <!-- ═══════════════ METRIC CARDS ═══════════════ -->
     <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -327,7 +327,7 @@ onMounted(() => {
         :icon="Zap"
         color-class="amber"
         :trend="{ value: tokenPercentage > 60 ? 15 : -5, direction: tokenPercentage > 60 ? 'up' : 'down', label: 'ອັດຕາການໃຊ້' }"
-        :footnote="`ຈາກ ${activePackage?.maxTokens?.toLocaleString() ?? 0} tokens`"
+        :footnote="`ຈາກ ${effectiveTokenLimit.toLocaleString()} tokens (${bonusTokens.toLocaleString()} bonus)`"
       />
     </section>
 
@@ -381,16 +381,7 @@ onMounted(() => {
       </div>
     </section>
 
-    <!-- ═══════════════ MOCK MODE BANNER ═══════════════ -->
-    <section
-      v-if="isMockMode"
-      class="app-muted-surface flex flex-col gap-3 p-3 text-sm text-slate-700 dark:text-slate-300 sm:flex-row sm:items-center sm:justify-between"
-    >
-      <span><strong>Mock mode:</strong> backend ຍັງບໍ່ຕອບ, ລະບົບກຳລັງໃຊ້ຂໍ້ມູນຈຳລອງ.</span>
-      <button class="app-btn-secondary min-h-9 py-1.5" type="button" @click="isMockMode = false; fetchPages();">
-        ລອງເຊື່ອມຕໍ່ຄືນ
-      </button>
-    </section>
+
 
     <!-- ═══════════════ ERROR BANNER ═══════════════ -->
     <section
@@ -400,129 +391,6 @@ onMounted(() => {
       {{ error }}
     </section>
 
-    <!-- ═══════════════ LOADING ═══════════════ -->
-    <section v-if="loading" class="app-surface p-10 text-center text-sm text-slate-500">
-      ກຳລັງໂຫຼດຂໍ້ມູນເພຈ...
-    </section>
 
-    <!-- ═══════════════ EMPTY STATE ═══════════════ -->
-    <section v-else-if="pagesList.length === 0" class="app-surface p-8 text-center">
-      <Bot class="mx-auto h-10 w-10 text-slate-400" />
-      <h2 class="mt-3 text-lg font-bold text-slate-950 dark:text-white">ຍັງບໍ່ມີເພຈທີ່ເຊື່ອມຕໍ່</h2>
-      <p class="mx-auto mt-2 max-w-xl text-sm text-slate-600 dark:text-slate-400">
-        ເຊື່ອມຕໍ່ Facebook Page ເພື່ອເລີ່ມຝຶກ AI bot ແລະຕິດຕາມ CRM.
-      </p>
-      <button class="app-btn-primary mt-5" type="button" @click="showAddForm = true">
-        <Plus class="h-4 w-4" />
-        ເຊື່ອມຕໍ່ເພຈ
-      </button>
-    </section>
-
-    <!-- ═══════════════ CONNECTED PAGES ═══════════════ -->
-    <section v-else>
-      <div class="mb-4 flex items-center justify-between">
-        <h2 class="text-lg font-bold text-slate-950 dark:text-white">
-          ເພຈທີ່ເຊື່ອມຕໍ່
-          <span class="ml-2 text-sm font-normal text-slate-500">({{ pagesList.length }})</span>
-        </h2>
-        <button class="app-btn-secondary text-sm" type="button" @click="showAddForm = true">
-          <Plus class="h-4 w-4" />
-          ເພີ່ມເພຈ
-        </button>
-      </div>
-
-      <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <article
-          v-for="page in pagesList"
-          :key="page.id"
-          class="app-surface flex min-h-56 flex-col justify-between p-4 transition-all duration-200 hover:shadow-md"
-        >
-          <div>
-            <div class="flex items-start justify-between gap-3">
-              <div class="min-w-0">
-                <h3 class="truncate text-base font-bold text-slate-950 dark:text-white">{{ page.fbPageName }}</h3>
-                <p class="mt-1 truncate text-xs text-slate-500">ID: {{ page.fbPageId }}</p>
-              </div>
-              <button
-                class="inline-flex h-9 w-14 shrink-0 items-center rounded-full p-1 transition"
-                :class="page.isActive ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-700'"
-                type="button"
-                :title="page.isActive ? 'Disable bot' : 'Enable bot'"
-                @click="togglePageActive(page)"
-              >
-                <span
-                  class="h-7 w-7 rounded-full bg-white shadow transition"
-                  :class="page.isActive ? 'translate-x-5' : 'translate-x-0'"
-                ></span>
-              </button>
-            </div>
-
-            <div class="app-muted-surface mt-4 flex items-center gap-2 px-3 py-2 text-xs">
-              <CheckCircle2 v-if="page.isActive" class="h-4 w-4 text-emerald-600" />
-              <Bot v-else class="h-4 w-4 text-slate-500" />
-              <span>{{ page.isActive ? 'Bot ກຳລັງເປີດໃຊ້ງານ' : 'Bot ຖືກປິດໄວ້' }}</span>
-            </div>
-          </div>
-
-          <div class="mt-5 flex items-center justify-between border-t border-slate-200 pt-4 dark:border-slate-800">
-            <button
-              class="app-btn-secondary h-10 w-10 px-0 text-rose-600 hover:bg-rose-50 dark:text-rose-300 dark:hover:bg-rose-500/10"
-              type="button"
-              title="Delete page"
-              @click="handleDeletePage(page.id)"
-            >
-              <Trash2 class="h-4 w-4" />
-            </button>
-            <NuxtLink :to="`/dashboard/pages/${page.id}`" class="app-btn-secondary">
-              <Settings class="h-4 w-4" />
-              ກຳນົດຄ່າ bot
-            </NuxtLink>
-          </div>
-        </article>
-      </div>
-    </section>
-
-    <!-- ═══════════════ ADD PAGE MODAL ═══════════════ -->
-    <AppModal
-      v-model="showAddForm"
-      title="ເຊື່ອມຕໍ່ Facebook Page"
-      description="ປ້ອນ Page ID ແລະ access token ເພື່ອເປີດໃຊ້ AI bot."
-      size="lg"
-      @close="resetForm"
-    >
-      <div class="space-y-4">
-        <div
-          v-if="formError"
-          class="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm font-semibold text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300"
-        >
-          {{ formError }}
-        </div>
-
-        <div class="grid gap-4 md:grid-cols-3">
-          <div>
-            <label class="app-label">ຊື່ເພຈ</label>
-            <input v-model="fbPageName" type="text" class="app-input" placeholder="Green Shop" />
-          </div>
-          <div>
-            <label class="app-label">Facebook Page ID</label>
-            <input v-model="fbPageId" type="text" class="app-input" placeholder="1029384756" />
-          </div>
-          <div>
-            <label class="app-label">Page Access Token</label>
-            <input v-model="fbPageAccessToken" type="text" class="app-input" placeholder="EAABw..." />
-            <p class="mt-1 text-xs text-slate-500">Mock mode: ໃສ່ “mock” ຫຼື “test”.</p>
-          </div>
-        </div>
-      </div>
-
-      <template #footer>
-        <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <button class="app-btn-secondary" type="button" @click="showAddForm = false; resetForm();">ຍົກເລີກ</button>
-          <button class="app-btn-primary" type="button" :disabled="formLoading" @click="handleConnectPage">
-            {{ formLoading ? 'ກຳລັງເຊື່ອມຕໍ່...' : 'ເຊື່ອມຕໍ່ເພຈ' }}
-          </button>
-        </div>
-      </template>
-    </AppModal>
   </div>
 </template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useAuthStore } from '~/stores/auth';
-import { Check, Eye, EyeOff, Plus, Trash2, ToggleLeft, ToggleRight, Info, Lightbulb, Edit } from 'lucide-vue-next';
+import { Check, Eye, EyeOff, Plus, Trash2, ToggleLeft, ToggleRight, Info, Lightbulb, Edit, X } from 'lucide-vue-next';
 
 definePageMeta({
   layout: 'admin',
@@ -373,6 +373,71 @@ async function handleEdit() {
   }
 }
 
+// Test Connection
+const testLoading = ref(false);
+const testSuccess = ref(false);
+const testMessage = ref('');
+
+async function handleTest(isEdit = false) {
+  const key = isEdit ? editApiKey.value : apiKey.value;
+  const prov = isEdit ? editProvider.value : provider.value;
+  const model = isEdit ? editModelName.value : modelName.value;
+  const url = isEdit ? editBaseUrl.value : baseUrl.value;
+
+  if (!key) {
+    const msg = 'ກະລຸນາປ້ອນ API Key ກ່ອນທົດສອບ';
+    if (isEdit) {
+      editError.value = msg;
+    } else {
+      formError.value = msg;
+    }
+    return;
+  }
+
+  if (isEdit) {
+    editError.value = '';
+  } else {
+    formError.value = '';
+  }
+
+  testLoading.value = true;
+  testSuccess.value = false;
+  testMessage.value = '';
+
+  try {
+    const res = await $fetch<any>(`${apiUrl}/api/admin/ai-config/test`, {
+      method: 'POST',
+      headers: headers.value,
+      body: {
+        provider: prov,
+        modelName: model,
+        apiKey: key,
+        baseUrl: url || undefined,
+      },
+    });
+
+    if (res.success) {
+      testSuccess.value = true;
+      testMessage.value = `ທົດສອບສຳເລັດ! AI ຕອບກັບວ່າ: "${res.response}"`;
+      await dialog.success('ເຊື່ອມຕໍ່ສຳເລັດ', testMessage.value);
+    } else {
+      throw new Error(res.error || 'ທົດສອບການເຊື່ອມຕໍ່ບໍ່ສຳເລັດ');
+    }
+  } catch (err: any) {
+    testSuccess.value = false;
+    const errMsg = err.data?.error || err.message || 'ບໍ່ສາມາດເຊື່ອມຕໍ່ຫາ AI Provider ໄດ້. ກະລຸນາກວດສອບ API Key ຄືນໃໝ່.';
+    testMessage.value = errMsg;
+    if (isEdit) {
+      editError.value = errMsg;
+    } else {
+      formError.value = errMsg;
+    }
+    await dialog.error('ເຊື່ອມຕໍ່ຫຼົ້ມເຫຼວ', errMsg);
+  } finally {
+    testLoading.value = false;
+  }
+}
+
 onMounted(() => {
   fetchConfigs();
 });
@@ -393,152 +458,40 @@ onMounted(() => {
       </div>
 
       <button
-        @click="showCreateForm = !showCreateForm"
+        @click="showCreateForm = true"
         class="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm px-4 py-2.5 rounded-xl shadow-md shadow-indigo-600/20 transition-all"
       >
         <Plus class="h-4 w-4" />
-        {{ showCreateForm ? 'ປິດຟອມ' : 'ເພີ່ມ AI Config' }}
+        ເພີ່ມ AI Config
       </button>
     </div>
 
-    <!-- Create Form -->
-    <div
-      v-if="showCreateForm"
-      class="mb-8 bg-white dark:bg-slate-900/40 backdrop-blur-md border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-xl transition-all"
-    >
-      <h3 class="text-lg font-bold text-slate-900 dark:text-slate-100 mb-1">ເພີ່ມການຕັ້ງຄ່າ AI ໃໝ່</h3>
-      <p class="text-sm text-slate-500 dark:text-slate-400 mb-5">
-        ເລືອກ AI Provider ທີ່ຕ້ອງການ ແລະ ປ້ອນຂໍ້ມູນໃຫ້ຄົບຖ້ວນ.
-      </p>
-
-      <!-- Provider selection with cards -->
-      <div class="mb-5">
-        <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
-          AI Provider <span class="text-rose-500">*</span>
-        </label>
-        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-          <button
-            v-for="(opt, key) in providerOptions"
-            :key="key"
-            type="button"
-            @click="provider = key as ProviderKey"
-            class="flex items-center gap-2 rounded-xl border-2 px-3 py-2.5 text-left text-sm font-semibold transition-all"
-            :class="provider === key
-              ? 'border-indigo-500 bg-indigo-50 text-indigo-700 dark:border-indigo-400 dark:bg-indigo-500/10 dark:text-indigo-300'
-              : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400 dark:hover:border-slate-600'"
-          >
-            <span>{{ opt.icon }}</span>
-            <span class="truncate">{{ opt.label }}</span>
-          </button>
-        </div>
-        <!-- Provider description -->
-        <p class="mt-2 flex items-start gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-          <Info class="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-400" />
-          {{ selectedProvider.description }}
-        </p>
+    <!-- Loading -->
+    <div v-if="loading" class="space-y-5">
+      <div class="space-y-3">
+        <AppSkeletonBlock class="h-4 w-36" />
+        <AppSkeletonBlock class="h-8 w-80 max-w-full" />
+        <AppSkeletonBlock class="h-4 w-[28rem] max-w-full" />
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <!-- Model Name -->
-        <div>
-          <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1">
-            Model Name <span class="text-rose-500">*</span>
-          </label>
-          <div class="relative">
-            <input
-              v-model="modelName"
-              type="text"
-              :placeholder="selectedProvider.placeholder"
-              class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2.5 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:text-slate-200"
-              list="model-suggestions"
-            />
-            <datalist id="model-suggestions">
-              <option v-for="m in selectedProvider.models" :key="m" :value="m" />
-            </datalist>
+      <div class="grid gap-4 lg:grid-cols-2">
+        <div v-for="n in 4" :key="n" class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900/40">
+          <div class="flex items-start justify-between gap-4">
+            <div class="space-y-2">
+              <AppSkeletonBlock class="h-4 w-36" />
+              <AppSkeletonBlock class="h-3 w-28" />
+            </div>
+            <AppSkeletonBlock class="h-9 w-20 rounded-full" />
           </div>
-          <p class="mt-1 flex items-start gap-1 text-xs text-slate-400 dark:text-slate-500">
-            <Lightbulb class="mt-0.5 h-3 w-3 shrink-0 text-amber-400" />
-            ຕົວຢ່າງ:
-            <span class="font-mono text-indigo-500 dark:text-indigo-400">
-              {{ selectedProvider.models.slice(0, 3).join(', ') }}
-              <template v-if="selectedProvider.models.length > 3">, ...</template>
-            </span>
-          </p>
-        </div>
 
-        <!-- API Key -->
-        <div>
-          <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1">
-            API Key <span class="text-rose-500">*</span>
-          </label>
-          <input
-            v-model="apiKey"
-            type="password"
-            :placeholder="`ໃສ່ API Key (${selectedProvider.keyPrefix})`"
-            class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2.5 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:text-slate-200"
-          />
-          <p class="mt-1 flex items-start gap-1 text-xs text-slate-400 dark:text-slate-500">
-            <Lightbulb class="mt-0.5 h-3 w-3 shrink-0 text-amber-400" />
-            Key ຈະຖືກເກັບໄວ້ໃນຖານຂໍ້ມູນ ແລະ ສະແດງແບບປິດບັງ.
-            ຕົວຢ່າງ: <span class="font-mono text-indigo-500 dark:text-indigo-400">{{ selectedProvider.keyPrefix }}</span>
-          </p>
-        </div>
-
-        <!-- Base URL -->
-        <div>
-          <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1">
-            Base URL
-            <span class="text-xs font-normal text-slate-400">(optional)</span>
-          </label>
-          <input
-            v-model="baseUrl"
-            type="text"
-            :placeholder="selectedProvider.baseUrlHint"
-            class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2.5 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:text-slate-200"
-          />
-          <p class="mt-1 flex items-start gap-1 text-xs text-slate-400 dark:text-slate-500">
-            <Lightbulb class="mt-0.5 h-3 w-3 shrink-0 text-amber-400" />
-            <span v-if="provider === 'gemini'">ບໍ່ຈຳເປັນຕ້ອງປ້ອນສຳລັບ Gemini (Google ຈັດການໃຫ້ອັດຕະໂນມັດ).</span>
-            <span v-else-if="provider === 'custom'">ຈຳເປັນສຳລັບ Custom API — ຕົວຢ່າງ: <span class="font-mono text-indigo-500 dark:text-indigo-400">http://localhost:11434/v1</span> (Ollama)</span>
-            <span v-else>ຕົວຢ່າງ: <span class="font-mono text-indigo-500 dark:text-indigo-400">{{ selectedProvider.baseUrlHint }}</span></span>
-          </p>
-        </div>
-
-        <!-- Is Active -->
-        <div class="flex items-center gap-3 pt-6">
-          <label class="relative inline-flex cursor-pointer items-center">
-            <input v-model="isActive" type="checkbox" class="peer sr-only" />
-            <div class="h-6 w-11 rounded-full bg-slate-300 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-all peer-checked:bg-indigo-600 peer-checked:after:translate-x-full dark:bg-slate-600"></div>
-          </label>
-          <div>
-            <span class="text-sm font-semibold text-slate-700 dark:text-slate-300">ເປີດໃຊ້ງານ (Active)</span>
-            <p class="text-xs text-slate-400 dark:text-slate-500">ເມື່ອເປີດໃຊ້, ລະບົບຈະໃຊ້ AI Config ນີ້ໃນການຕອບກັບລູກຄ້າ.</p>
+          <div class="mt-5 space-y-3">
+            <AppSkeletonBlock class="h-4 w-32" />
+            <AppSkeletonBlock class="h-10 w-full rounded-xl" />
+            <AppSkeletonBlock class="h-4 w-24" />
           </div>
         </div>
-      </div>
-
-      <p v-if="formError" class="mt-3 text-sm font-semibold text-red-500">{{ formError }}</p>
-
-      <div class="mt-6 flex gap-3">
-        <button
-          @click="handleCreate"
-          :disabled="formLoading"
-          class="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-400 text-white font-bold text-sm px-5 py-2.5 rounded-xl shadow-md transition-all"
-        >
-          <Check class="h-4 w-4" />
-          {{ formLoading ? 'ກຳລັງບັນທຶກ...' : 'ບັນທຶກ' }}
-        </button>
-        <button
-          @click="showCreateForm = false"
-          class="text-sm font-semibold text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 px-4 py-2.5"
-        >
-          ຍົກເລີກ
-        </button>
       </div>
     </div>
-
-    <!-- Loading -->
-    <div v-if="loading" class="text-center py-12 text-slate-500">ກຳລັງໂຫຼດຂໍ້ມູນ...</div>
 
     <!-- Error -->
     <div v-if="error" class="bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-800 rounded-xl p-4 text-sm font-semibold text-red-600 dark:text-red-400">
@@ -552,7 +505,7 @@ onMounted(() => {
         :key="cfg.id"
         class="bg-white dark:bg-slate-900/40 backdrop-blur-md border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm transition-all"
       >
-        <div class="flex items-start justify-between gap-4">
+        <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
           <div class="flex-1 space-y-2">
             <div class="flex items-center gap-3 flex-wrap">
               <span
@@ -570,7 +523,7 @@ onMounted(() => {
                   : 'bg-slate-100 text-slate-500 dark:bg-slate-500/20 dark:text-slate-400'"
               >
                 <span class="h-1.5 w-1.5 rounded-full" :class="cfg.isActive ? 'bg-emerald-500' : 'bg-slate-400'"></span>
-                {{ cfg.isActive ? 'Active' : 'Inactive' }}
+                {{ cfg.isActive ? 'ຄ່າເລີ່ມຕົ້ນ (Default)' : 'ທົ່ວໄປ' }}
               </span>
             </div>
 
@@ -598,7 +551,7 @@ onMounted(() => {
           </div>
 
           <!-- Actions -->
-          <div class="flex items-center gap-2 shrink-0">
+          <div class="flex items-center gap-2 flex-wrap sm:flex-nowrap border-t border-slate-100 dark:border-slate-800/80 pt-3 sm:pt-0 sm:border-0 shrink-0">
             <button
               @click="openEdit(cfg)"
               class="flex items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-bold text-indigo-600 hover:bg-indigo-50 dark:text-indigo-400 dark:hover:bg-indigo-500/10 transition-all"
@@ -615,7 +568,7 @@ onMounted(() => {
             >
               <ToggleRight v-if="cfg.isActive" class="h-3.5 w-3.5" />
               <ToggleLeft v-else class="h-3.5 w-3.5" />
-              {{ cfg.isActive ? 'Deactivate' : 'Activate' }}
+              {{ cfg.isActive ? 'ຍົກເລີກຄ່າເລີ່ມຕົ້ນ' : 'ຕັ້ງເປັນຄ່າເລີ່ມຕົ້ນ' }}
             </button>
             <button
               @click="handleDelete(cfg.id)"
@@ -724,23 +677,35 @@ onMounted(() => {
             <div class="h-6 w-11 rounded-full bg-slate-300 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-all peer-checked:bg-indigo-600 peer-checked:after:translate-x-full dark:bg-slate-600"></div>
           </label>
           <div>
-            <span class="text-sm font-semibold text-slate-700 dark:text-slate-300">ເປີດໃຊ້ງານ (Active)</span>
-            <p class="text-xs text-slate-400 dark:text-slate-500">ເມື່ອເປີດໃຊ້, ລະບົບຈະໃຊ້ AI Config ນີ້ໃນການຕອບກັບລູກຄ້າ.</p>
+            <span class="text-sm font-semibold text-slate-700 dark:text-slate-300">ຕັ້ງເປັນຄ່າເລີ່ມຕົ້ນ (Default)</span>
+            <p class="text-xs text-slate-400 dark:text-slate-500">ເມື່ອເປີດໃຊ້, ລະບົບຈະໃຊ້ AI Config ນີ້ເປັນຄ່າເລີ່ມຕົ້ນສຳລັບທຸກໆເພຈທີ່ບໍ່ໄດ້ເລືອກ AI ສະເພາະ.</p>
           </div>
         </div>
       </div>
 
       <template #footer>
-        <div class="flex justify-end gap-3">
+        <div class="flex justify-end gap-3 flex-wrap">
+          <button
+            type="button"
+            @click="handleTest(true)"
+            :disabled="testLoading || editLoading"
+            class="px-4 py-2 border-2 border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs transition-all flex items-center gap-1"
+          >
+            <span v-if="testLoading" class="material-icons select-none text-xs animate-spin">refresh</span>
+            <span v-else class="material-icons select-none text-xs text-indigo-500">bolt</span>
+            ທົດສອບການເຊື່ອມຕໍ່
+          </button>
+
           <button
             @click="closeEdit"
             class="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-xl text-xs transition-all"
           >
             ຍົກເລີກ
           </button>
+          
           <button
             @click="handleEdit"
-            :disabled="editLoading"
+            :disabled="editLoading || testLoading"
             class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-400 text-white font-bold rounded-xl text-xs shadow-md shadow-indigo-600/20 transition-all flex items-center gap-1"
           >
             <span v-if="editLoading" class="material-icons select-none text-base animate-spin">refresh</span>
@@ -749,5 +714,181 @@ onMounted(() => {
         </div>
       </template>
     </AppModal>
+
+    <!-- Create AI Config Modal (Slides from top) -->
+    <Teleport to="body">
+      <div 
+        class="modal modal-top fade" 
+        :class="{ 'show block bg-slate-950/60 backdrop-blur-sm': showCreateForm }"
+        tabindex="-1"
+        role="dialog"
+        style="transition: all 0.3s ease; position: fixed; inset: 0; z-index: 1050; overflow-y: auto;"
+        v-if="showCreateForm"
+        @click.self="showCreateForm = false"
+      >
+        <div 
+          class="modal-dialog" 
+          role="document"
+          style="max-width: 600px; margin: 1.75rem auto; transform: translateY(-50px); transition: transform 0.3s ease-out;"
+          :style="showCreateForm ? 'transform: translateY(0);' : ''"
+        >
+          <div class="modal-content bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl overflow-hidden">
+            <div class="modal-header border-b border-slate-200 dark:border-slate-800 px-6 py-4 flex items-center justify-between bg-slate-50 dark:bg-slate-900/50">
+              <h5 class="modal-title font-extrabold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <Plus class="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
+                ເພີ່ມການຕັ້ງຄ່າ AI ໃໝ່
+              </h5>
+              <button 
+                type="button" 
+                class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 flex p-1" 
+                @click="showCreateForm = false"
+              >
+                <X class="h-5 w-5" />
+              </button>
+            </div>
+            
+            <div class="modal-body px-6 py-6 space-y-4 max-h-[70vh] overflow-y-auto">
+              <!-- Provider selection with cards -->
+              <div>
+                <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
+                  AI Provider <span class="text-rose-500">*</span>
+                </label>
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  <button
+                    v-for="(opt, key) in providerOptions"
+                    :key="key"
+                    type="button"
+                    @click="provider = key as ProviderKey"
+                    class="flex items-center gap-2 rounded-xl border-2 px-3 py-2 text-left text-sm font-semibold transition-all"
+                    :class="provider === key
+                      ? 'border-indigo-500 bg-indigo-50 text-indigo-700 dark:border-indigo-400 dark:bg-indigo-500/10 dark:text-indigo-300'
+                      : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400 dark:hover:border-slate-600'"
+                  >
+                    <span>{{ opt.icon }}</span>
+                    <span class="truncate">{{ opt.label }}</span>
+                  </button>
+                </div>
+                <!-- Provider description -->
+                <p class="mt-2 flex items-start gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                  <Info class="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                  {{ selectedProvider.description }}
+                </p>
+              </div>
+
+              <!-- Model Name -->
+              <div>
+                <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Model Name <span class="text-rose-500">*</span>
+                </label>
+                <div class="relative">
+                  <input
+                    v-model="modelName"
+                    type="text"
+                    :placeholder="selectedProvider.placeholder"
+                    class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:text-slate-200"
+                    list="model-suggestions"
+                  />
+                  <datalist id="model-suggestions">
+                    <option v-for="m in selectedProvider.models" :key="m" :value="m" />
+                  </datalist>
+                </div>
+                <p class="mt-1 flex items-start gap-1 text-xs text-slate-400 dark:text-slate-500">
+                  <Lightbulb class="mt-0.5 h-3 w-3 shrink-0 text-amber-400" />
+                  ຕົວຢ່າງ:
+                  <span class="font-mono text-indigo-500 dark:text-indigo-400">
+                    {{ selectedProvider.models.slice(0, 3).join(', ') }}
+                    <template v-if="selectedProvider.models.length > 3">, ...</template>
+                  </span>
+                </p>
+              </div>
+
+              <!-- API Key -->
+              <div>
+                <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  API Key <span class="text-rose-500">*</span>
+                </label>
+                <input
+                  v-model="apiKey"
+                  type="password"
+                  :placeholder="`ໃສ່ API Key (${selectedProvider.keyPrefix})`"
+                  class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:text-slate-200"
+                />
+                <p class="mt-1 flex items-start gap-1 text-xs text-slate-400 dark:text-slate-500">
+                  <Lightbulb class="mt-0.5 h-3 w-3 shrink-0 text-amber-400" />
+                  Key ຈະຖືກເກັບໄວ້ໃນຖານຂໍ້ມູນ ແລະ ສະແດງແບບປິດບັງ.
+                </p>
+              </div>
+
+              <!-- Base URL -->
+              <div>
+                <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Base URL <span class="text-xs font-normal text-slate-400">(optional)</span>
+                </label>
+                <input
+                  v-model="baseUrl"
+                  type="text"
+                  :placeholder="selectedProvider.baseUrlHint"
+                  class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2.5 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:text-slate-200"
+                />
+                <p class="mt-1 flex items-start gap-1 text-xs text-slate-400 dark:text-slate-500">
+                  <Lightbulb class="mt-0.5 h-3 w-3 shrink-0 text-amber-400" />
+                  <span v-if="provider === 'gemini'">ບໍ່ຈຳເປັນຕ້ອງປ້ອນສຳລັບ Gemini.</span>
+                  <span v-else-if="provider === 'custom'">ຈຳເປັນສຳລັບ Custom API.</span>
+                  <span v-else>ຕົວຢ່າງ: <span class="font-mono text-indigo-500 dark:text-indigo-400">{{ selectedProvider.baseUrlHint }}</span></span>
+                </p>
+              </div>
+
+              <!-- Is Active -->
+              <div class="flex items-center gap-3 p-4 bg-slate-50 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800">
+                <label class="relative inline-flex cursor-pointer items-center">
+                  <input v-model="isActive" type="checkbox" class="peer sr-only" />
+                  <div class="h-6 w-11 rounded-full bg-slate-300 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-all peer-checked:bg-indigo-600 peer-checked:after:translate-x-full dark:bg-slate-600"></div>
+                </label>
+                <div>
+                  <span class="text-sm font-semibold text-slate-700 dark:text-slate-300">ຕັ້ງເປັນຄ່າເລີ່ມຕົ້ນ (Default)</span>
+                  <p class="text-xs text-slate-400 dark:text-slate-500">ເມື່ອເປີດໃຊ້, ລະບົບຈະໃຊ້ AI Config ນີ້ເປັນຄ່າເລີ່ມຕົ້ນສຳລັບທຸກໆເພຈທີ່ບໍ່ໄດ້ເລືອກ AI ສະເພາະ.</p>
+                </div>
+              </div>
+
+              <p v-if="formError" class="text-sm font-semibold text-red-500">{{ formError }}</p>
+              
+              <p v-if="testSuccess && testMessage" class="text-xs font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1 bg-emerald-50 dark:bg-emerald-950/20 p-3 rounded-xl border border-emerald-200 dark:border-emerald-800">
+                <span class="material-icons select-none text-sm">check_circle</span>
+                {{ testMessage }}
+              </p>
+            </div>
+            
+            <div class="modal-footer border-t border-slate-200 dark:border-slate-800 px-6 py-4 bg-slate-50 dark:bg-slate-900/50 flex flex-wrap gap-2 justify-end">
+              <button
+                type="button"
+                @click="handleTest(false)"
+                :disabled="testLoading || formLoading"
+                class="px-4 py-2 border border-slate-200 dark:border-slate-700 hover:border-slate-300 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs transition-all flex items-center gap-1 shadow-sm"
+              >
+                <span v-if="testLoading" class="material-icons select-none text-xs animate-spin">refresh</span>
+                <span v-else class="material-icons select-none text-xs text-indigo-500">bolt</span>
+                ທົດສອບການເຊື່ອມຕໍ່
+              </button>
+
+              <button
+                @click="showCreateForm = false"
+                class="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-xl text-xs transition-all"
+              >
+                ຍົກເລີກ
+              </button>
+
+              <button
+                @click="handleCreate"
+                :disabled="formLoading || testLoading"
+                class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-400 text-white font-bold rounded-xl text-xs shadow-md shadow-indigo-600/20 transition-all flex items-center gap-1"
+              >
+                <span v-if="formLoading" class="material-icons select-none text-base animate-spin">refresh</span>
+                {{ formLoading ? 'ກຳລັງບັນທຶກ...' : 'ບັນທຶກ' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>

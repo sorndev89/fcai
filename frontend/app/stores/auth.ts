@@ -7,6 +7,7 @@ interface User {
   role: 'admin' | 'tenant';
   status: 'pending' | 'approved' | 'suspended';
   packageId?: string;
+  bonusTokens?: number;
 }
 
 export const useAuthStore = defineStore('auth', () => {

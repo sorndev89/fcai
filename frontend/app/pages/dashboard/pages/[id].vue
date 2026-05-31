@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { useAuthStore } from '~/stores/auth';
-import { useMockStore } from '~/stores/mockData';
 
 definePageMeta({
   middleware: 'auth',
@@ -9,18 +8,32 @@ definePageMeta({
 
 const route = useRoute();
 const authStore = useAuthStore();
-const mockStore = useMockStore();
 const apiUrl = useApiUrl();
 
 const pageId = route.params.id as string;
 const pageData = ref<any>(null);
 const customers = ref<any[]>([]);
+const loading = ref(true);
 
 // KB Editor state
 const knowledgeBase = ref('');
 const saveLoading = ref(false);
 const saveSuccess = ref(false);
 const saveError = ref('');
+
+// Edit Page Connection state
+const showEditForm = ref(false);
+const editFbPageId = ref('');
+const editFbPageName = ref('');
+const editFbPageAccessToken = ref('');
+const editAiName = ref('');
+const editFormError = ref('');
+const editFormLoading = ref(false);
+const editFormSuccess = ref(false);
+
+// Test Connection state
+const testLoading = ref(false);
+const testResult = ref<{ success: boolean; message: string; pageName?: string } | null>(null);
 
 // Simulator state
 const messages = ref<any[]>([]);
@@ -29,7 +42,29 @@ const simLoading = ref(false);
 const simUserPsid = ref('test-user-123');
 const activeSimulatorTab = ref('chat'); // 'chat' or 'logs'
 const debugLogs = ref<string[]>([]);
-const isMockMode = ref(false);
+const chatContainer = ref<HTMLElement | null>(null);
+
+function scrollToBottom() {
+  nextTick(() => {
+    if (chatContainer.value) {
+      chatContainer.value.scrollTop = chatContainer.value.scrollHeight;
+    }
+  });
+}
+
+watch(messages, () => {
+  scrollToBottom();
+}, { deep: true });
+
+watch(simLoading, () => {
+  scrollToBottom();
+});
+
+watch(activeSimulatorTab, (val) => {
+  if (val === 'chat') {
+    scrollToBottom();
+  }
+});
 
 // Viewport layout logic (unified device detection logic)
 const { isMobile, isTablet, isDesktop } = useDevice();
@@ -39,19 +74,37 @@ const headers = computed(() => ({
   Authorization: `Bearer ${authStore.token}`,
 }));
 
-async function loadPageDetails() {
-  if (isMockMode.value || authStore.token?.startsWith('mock')) {
-    isMockMode.value = true;
-    const page = mockStore.getPages().find((p) => p.id === pageId);
-    if (page) {
-      pageData.value = page;
-      knowledgeBase.value = page.knowledgeBase || '';
-      // Load simulator customer
-      customers.value = mockStore.getCustomers(pageId);
-    }
-    return;
-  }
+// ─── Token expiry helper ────────────────────────────────────
+const tokenExpiryInfo = computed(() => {
+  if (!pageData.value) return null;
+  const expiresAt = pageData.value.fbTokenExpiresAt;
+  const hasOAuth = !!pageData.value.fbUserAccessToken;
+  if (!expiresAt) return null;
+  
+  const expiryDate = new Date(expiresAt);
+  const now = new Date();
+  const daysLeft = Math.ceil((expiryDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  
+  let status: 'valid' | 'warning' | 'expired' = 'valid';
+  if (daysLeft <= 0) status = 'expired';
+  else if (daysLeft <= 14) status = 'warning';
+  
+  return {
+    hasOAuth,
+    expiryDate,
+    daysLeft: Math.max(0, daysLeft),
+    status,
+    formattedDate: expiryDate.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+  };
+});
 
+async function loadPageDetails() {
   try {
     const data = await $fetch<any>(`${apiUrl}/api/pages/${pageId}`, {
       headers: headers.value,
@@ -60,19 +113,95 @@ async function loadPageDetails() {
     knowledgeBase.value = data.knowledgeBase || '';
     
     // Load page's customers
-    const custData = await $fetch<any[]>(`${apiUrl}/api/customers?pageId=${pageId}`, {
+    const custData = await $fetch<any[]>(`${apiUrl}/api/customers/page/${pageId}`, {
       headers: headers.value,
     });
     customers.value = custData;
-  } catch (err) {
-    console.warn('ບໍ່ສາມາດດຶງຂໍ້ມູນລາຍລະອຽດເພຈ໌ຈາກ Backend. ເປີດໃຊ້ງານໂໝດ Mockup Data.');
-    isMockMode.value = true;
-    const page = mockStore.getPages().find((p) => p.id === pageId);
-    if (page) {
-      pageData.value = page;
-      knowledgeBase.value = page.knowledgeBase || '';
-      customers.value = mockStore.getCustomers(pageId);
-    }
+  } catch (err: any) {
+    console.error('Error loading page details:', err);
+  } finally {
+    loading.value = false;
+  }
+}
+
+function openEditModal() {
+  if (pageData.value) {
+    editFbPageId.value = pageData.value.fbPageId || '';
+    editFbPageName.value = pageData.value.fbPageName || '';
+    editFbPageAccessToken.value = pageData.value.fbPageAccessToken || '';
+    editAiName.value = pageData.value.aiName || '';
+  }
+  editFormError.value = '';
+  editFormSuccess.value = false;
+  testResult.value = null;
+  showEditForm.value = true;
+}
+
+async function handleTestConnection(isSaved = false) {
+  testLoading.value = true;
+  testResult.value = null;
+  try {
+    const body = isSaved ? {} : {
+      fbPageId: editFbPageId.value.trim(),
+      fbPageAccessToken: editFbPageAccessToken.value.trim()
+    };
+    const endpoint = isSaved 
+      ? `${apiUrl}/api/pages/${pageId}/test-connection`
+      : `${apiUrl}/api/pages/test-connection`;
+
+    const res = await $fetch<any>(endpoint, {
+      method: 'POST',
+      headers: headers.value,
+      body: isSaved ? undefined : body,
+    });
+
+    testResult.value = {
+      success: true,
+      message: res.message || 'ການເຊື່ອມຕໍ່ສຳເລັດແລ້ວ!',
+      pageName: res.pageName,
+    };
+  } catch (err: any) {
+    testResult.value = {
+      success: false,
+      message: err.data?.error || 'ບໍ່ສາມາດເຊື່ອມຕໍ່ກັບ Facebook Page ໄດ້.',
+    };
+  } finally {
+    testLoading.value = false;
+  }
+}
+
+async function handleUpdatePage() {
+  editFormError.value = '';
+  editFormSuccess.value = false;
+
+  if (!editFbPageId.value.trim() || !editFbPageName.value.trim()) {
+    editFormError.value = 'ກະລຸນາປ້ອນ Facebook Page ID ແລະ ຊື່ເພຈ.';
+    return;
+  }
+
+  editFormLoading.value = true;
+
+  try {
+    await $fetch(`${apiUrl}/api/pages/${pageId}`, {
+      method: 'PUT',
+      headers: headers.value,
+      body: {
+        fbPageId: editFbPageId.value.trim(),
+        fbPageName: editFbPageName.value.trim(),
+        fbPageAccessToken: editFbPageAccessToken.value.trim(),
+        aiName: editAiName.value.trim(),
+      },
+    });
+    
+    editFormSuccess.value = true;
+    await loadPageDetails();
+    setTimeout(() => {
+      showEditForm.value = false;
+    }, 1500);
+  } catch (err: any) {
+    editFormError.value = err.data?.error || 'ບໍ່ສາມາດອັບເດດຂໍ້ມູນໄດ້';
+  } finally {
+    editFormLoading.value = false;
   }
 }
 
@@ -81,19 +210,8 @@ async function handleSaveKB() {
   saveSuccess.value = false;
   saveError.value = '';
 
-  if (isMockMode.value) {
-    mockStore.updatePage(pageId, { knowledgeBase: knowledgeBase.value });
-    pageData.value.knowledgeBase = knowledgeBase.value;
-    saveSuccess.value = true;
-    saveLoading.value = false;
-    setTimeout(() => {
-      saveSuccess.value = false;
-    }, 3000);
-    return;
-  }
-
   try {
-    await $fetch(`${apiUrl}/api/pages/${pageId}/knowledge`, {
+    await $fetch(`${apiUrl}/api/pages/${pageId}`, {
       method: 'PUT',
       headers: headers.value,
       body: {
@@ -129,37 +247,12 @@ async function handleSimulateSend() {
   simLoading.value = true;
   debugLogs.value.push(`[Simulator] ສົ່ງຂໍ້ຄວາມຈາກຜູ້ໃຊ້: "${userMsg}" (PSID: ${simUserPsid.value})`);
 
-  if (isMockMode.value) {
-    // Call Pinia local RAG reply simulator
-    setTimeout(() => {
-      const response = mockStore.simulateAiReply(pageId, simUserPsid.value, userMsg);
-      
-      messages.value.push({
-        id: (Date.now() + 1).toString(),
-        senderId: 'bot',
-        messageText: response.reply,
-        createdAt: new Date().toISOString(),
-      });
-      
-      // Push simulator logs
-      debugLogs.value.push(`[Knowledge Base Query] ດຶງຂໍ້ມູນຄວາມຮູ້ຮ້ານຄ້າ...`);
-      debugLogs.value.push(`[CRM Search] ຊອກຫາຂໍ້ມູນ ແລະ ບັນທຶກສ່ວນຕົວຂອງລູກຄ້າ...`);
-      if (response.notesUsed) {
-        debugLogs.value.push(`[CRM Match] ພົບເຫັນຂໍ້ມູນບັນທຶກ: "${response.notesUsed}"`);
-      }
-      debugLogs.value.push(`[AI Respond] ສ້າງຄຳຕອບສຳເລັດ!`);
-      
-      simLoading.value = false;
-    }, 800);
-    return;
-  }
-
   try {
-    const res = await $fetch<{ reply: string; debug?: any }>(`${apiUrl}/api/webhook/simulate`, {
+    const res = await $fetch<{ reply: string; debug?: any }>(`${apiUrl}/webhook/facebook/simulate`, {
       method: 'POST',
       headers: headers.value,
       body: {
-        pageId: pageData.value.fbPageId,
+        fbPageId: pageData.value.fbPageId,
         senderPsid: simUserPsid.value,
         messageText: userMsg,
       },
@@ -176,19 +269,19 @@ async function handleSimulateSend() {
     if (res.debug) {
       debugLogs.value.push(`[AI Query Context] ${JSON.stringify(res.debug)}`);
     }
+
+    // Refresh the customers CRM list from the backend
+    try {
+      const custData = await $fetch<any[]>(`${apiUrl}/api/customers/page/${pageId}`, {
+        headers: headers.value,
+      });
+      customers.value = custData;
+    } catch (refreshErr) {
+      console.error('Failed to refresh customers list:', refreshErr);
+    }
   } catch (err: any) {
     console.error('Simulation error:', err);
     debugLogs.value.push(`[Error] ບໍ່ສາມາດເຊື່ອມຕໍ່ຫາ backend simulator: ${err.message}`);
-    
-    // Automatic fallback to local mockup simulator in case of API failure
-    const response = mockStore.simulateAiReply(pageId, simUserPsid.value, userMsg);
-    messages.value.push({
-      id: (Date.now() + 1).toString(),
-      senderId: 'bot',
-      messageText: response.reply,
-      createdAt: new Date().toISOString(),
-    });
-    debugLogs.value.push(`[Fallback Local RAG] (ໃຊ້ງານລະບົບຈຳລອງ Client-side) ພົບຂໍ້ມູນຄວາມຮູ້.`);
   } finally {
     simLoading.value = false;
   }
@@ -200,7 +293,40 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="space-y-6 transition-colors duration-200" v-if="pageData">
+  <div v-if="loading" class="space-y-6">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-1.5">
+        <AppSkeletonBlock class="h-4 w-4 rounded-full" />
+        <AppSkeletonBlock class="h-4 w-44" />
+      </div>
+      <AppSkeletonBlock class="h-9 w-28 rounded-xl" />
+    </div>
+
+    <div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/40">
+      <div class="space-y-3">
+        <AppSkeletonBlock class="h-4 w-36" />
+        <AppSkeletonBlock class="h-8 w-80 max-w-full" />
+        <AppSkeletonBlock class="h-3 w-64 max-w-full" />
+      </div>
+    </div>
+
+    <div class="grid gap-6 lg:grid-cols-12">
+      <div class="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/40 lg:col-span-7">
+        <AppSkeletonBlock class="h-6 w-64" />
+        <div class="grid gap-4 md:grid-cols-2">
+          <AppSkeletonBlock v-for="n in 4" :key="n" class="h-16 rounded-xl" />
+        </div>
+        <AppSkeletonBlock class="h-44 rounded-2xl" />
+      </div>
+
+      <div class="space-y-4 lg:col-span-5">
+        <AppSkeletonBlock class="h-64 rounded-2xl" />
+        <AppSkeletonBlock class="h-96 rounded-2xl" />
+      </div>
+    </div>
+  </div>
+
+  <div class="space-y-6 transition-colors duration-200" v-else-if="pageData">
     <!-- Breadcrumbs -->
     <div class="flex items-center justify-between">
       <NuxtLink
@@ -211,9 +337,7 @@ onMounted(() => {
         ກັບຄືນຫາໜ້າຫຼັກ
       </NuxtLink>
 
-      <span v-if="isMockMode" class="px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 text-xs font-semibold border border-indigo-200 dark:border-indigo-500/20">
-        ໂໝດຈຳລອງ
-      </span>
+
     </div>
 
     <!-- Header info card -->
@@ -222,17 +346,243 @@ onMounted(() => {
         <h2 class="text-2xl font-extrabold text-slate-900 dark:text-slate-100 flex items-center gap-2">
           {{ pageData.fbPageName }}
         </h2>
-        <p class="text-xs text-slate-500 mt-1">Facebook Page ID: {{ pageData.fbPageId }}</p>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-xs text-slate-500">
+          <span>Facebook Page ID: {{ pageData.fbPageId }}</span>
+          <span class="inline-flex items-center gap-1">
+            <span class="material-icons text-sm text-indigo-500">smart_toy</span>
+            ຊື່ AI: <strong class="text-indigo-600 dark:text-indigo-400">{{ pageData.aiName || 'ຜູ້ຊ່ວຍ AI' }}</strong>
+          </span>
+        </div>
       </div>
 
-      <div class="flex items-center gap-4">
-        <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold"
+      <div class="flex items-center gap-3 flex-wrap">
+        <button
+          type="button"
+          @click="handleTestConnection(true)"
+          :disabled="testLoading"
+          class="inline-flex items-center gap-1.5 px-4 py-2 bg-sky-50 dark:bg-sky-500/10 hover:bg-sky-100 dark:hover:bg-sky-500/20 text-sky-700 dark:text-sky-400 font-bold rounded-xl border border-sky-200 dark:border-sky-500/30 transition-all text-xs"
+        >
+          <span class="material-icons select-none text-sm animate-spin" v-if="testLoading">sync</span>
+          <span class="material-icons select-none text-sm" v-else>check_circle_outline</span>
+          {{ testLoading ? 'ກຳລັງທົດສອບ...' : 'ທົດສອບເຊື່ອມຕໍ່' }}
+        </button>
+
+        <button
+          type="button"
+          @click="openEditModal"
+          class="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold rounded-xl border border-slate-200 dark:border-slate-700 transition-all text-xs"
+        >
+          <span class="material-icons select-none text-sm">edit</span>
+          ແກ້ໄຂການເຊື່ອມຕໍ່
+        </button>
+
+        <span class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
           :class="pageData.isActive ? 'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30' : 'bg-rose-50 dark:bg-rose-500/15 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-500/30'">
           <span class="w-1.5 h-1.5 rounded-full" :class="pageData.isActive ? 'bg-emerald-500' : 'bg-rose-500'"></span>
           {{ pageData.isActive ? 'ບັອດເປີດໃຊ້ງານຢູ່' : 'ບັອດປິດການໃຊ້ງານ' }}
         </span>
+
+        <!-- Token Expiry Badge (for OAuth-connected pages) -->
+        <span
+          v-if="tokenExpiryInfo"
+          class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border"
+          :class="tokenExpiryInfo.status === 'expired'
+            ? 'bg-rose-50 dark:bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-200 dark:border-rose-500/30'
+            : tokenExpiryInfo.status === 'warning'
+              ? 'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-500/30'
+              : 'bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-200 dark:border-sky-500/30'"
+          :title="`ໝົດອາຍຸ: ${tokenExpiryInfo.formattedDate}`"
+        >
+          <span class="material-icons select-none text-sm">
+            {{ tokenExpiryInfo.status === 'expired' ? 'error' : tokenExpiryInfo.status === 'warning' ? 'warning' : 'verified_user' }}
+          </span>
+          <span>
+            <template v-if="tokenExpiryInfo.status === 'expired'">
+              Token ໝົດອາຍຸ
+            </template>
+            <template v-else-if="tokenExpiryInfo.status === 'warning'">
+              Token ໝົດອາຍຸໃນ {{ tokenExpiryInfo.daysLeft }} ວັນ
+            </template>
+            <template v-else>
+              Token ໃຊ້ໄດ້ {{ tokenExpiryInfo.daysLeft }} ວັນ
+            </template>
+          </span>
+        </span>
       </div>
     </div>
+
+    <!-- Live test connection result banner -->
+    <div v-if="testResult && !showEditForm" class="p-4 rounded-2xl border transition-all duration-350 flex items-center justify-between"
+      :class="testResult.success 
+        ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20 text-emerald-800 dark:text-emerald-300' 
+        : 'bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/20 text-rose-800 dark:text-rose-300'">
+      <div class="flex items-center gap-2.5">
+        <span class="material-icons select-none animate-pulse" :class="testResult.success ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
+          {{ testResult.success ? 'check_circle' : 'error' }}
+        </span>
+        <span class="text-sm">
+          <strong>ຜົນການທົດສອບ:</strong> {{ testResult.message }} 
+          <span v-if="testResult.pageName" class="underline font-bold">({{ testResult.pageName }})</span>
+        </span>
+      </div>
+      <button type="button" @click="testResult = null" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 flex">
+        <span class="material-icons select-none text-base">close</span>
+      </button>
+    </div>
+
+    <!-- Bootstrap Edit & Test Modal (slides from top) -->
+    <Teleport to="body">
+      <div 
+        class="modal modal-top fade" 
+        :class="{ 'show block bg-slate-950/60 backdrop-blur-sm': showEditForm }"
+        tabindex="-1"
+        role="dialog"
+        style="transition: all 0.3s ease; position: fixed; inset: 0; z-index: 1050; overflow-y: auto;"
+        v-if="showEditForm"
+      >
+        <div 
+          class="modal-dialog" 
+          role="document"
+          style="max-width: 600px; margin: 1.75rem auto; transform: translateY(-50px); transition: transform 0.3s ease-out;"
+          :style="showEditForm ? 'transform: translateY(0);' : ''"
+        >
+          <div class="modal-content bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl overflow-hidden">
+            <div class="modal-header border-b border-slate-200 dark:border-slate-800 px-6 py-4 flex items-center justify-between bg-slate-50 dark:bg-slate-900/50">
+              <h5 class="modal-title font-extrabold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <span class="material-icons select-none text-indigo-600 dark:text-indigo-400">edit</span>
+                ແກ້ໄຂການເຊື່ອມຕໍ່ Facebook Page
+              </h5>
+              <button 
+                type="button" 
+                class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 flex p-1" 
+                @click="showEditForm = false"
+              >
+                <span class="material-icons select-none">close</span>
+              </button>
+            </div>
+            
+            <form @submit.prevent="handleUpdatePage">
+              <div class="modal-body px-6 py-6 space-y-4">
+                <!-- Page Name -->
+                <div>
+                  <label class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-300" for="editFbPageName">
+                    ຊື່ເພຈ <span class="text-rose-500">*</span>
+                  </label>
+                  <input
+                    id="editFbPageName"
+                    v-model="editFbPageName"
+                    class="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 text-sm"
+                    type="text"
+                    placeholder="ຕົວຢ່າງ: ຮ້ານຂອງຂ້ອຍ"
+                  />
+                </div>
+
+                <!-- AI Name -->
+                <div>
+                  <label class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-300" for="editAiName">
+                    ຊື່ AI ປະຈຳເພຈ໌ (AI Name)
+                  </label>
+                  <input
+                    id="editAiName"
+                    v-model="editAiName"
+                    class="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 text-sm"
+                    type="text"
+                    placeholder="ຕົວຢ່າງ: ຜູ້ຊ່ວຍ AI"
+                  />
+                </div>
+
+                <!-- Page ID -->
+                <div>
+                  <label class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-300" for="editFbPageId">
+                    Facebook Page ID <span class="text-rose-500">*</span>
+                  </label>
+                  <input
+                    id="editFbPageId"
+                    v-model="editFbPageId"
+                    class="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100 placeholder-slate-405 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 text-sm font-mono"
+                    type="text"
+                    placeholder="123456789012345"
+                  />
+                </div>
+
+                <!-- Page Access Token -->
+                <div>
+                  <label class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-300" for="editFbPageAccessToken">
+                    Page Access Token
+                  </label>
+                  <textarea
+                    id="editFbPageAccessToken"
+                    v-model="editFbPageAccessToken"
+                    rows="3"
+                    class="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-slate-100 placeholder-slate-405 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 text-sm font-mono"
+                    placeholder="EAAx... (ເລືອກໄດ້)"
+                  ></textarea>
+                </div>
+
+                <!-- Live Test Connection inside Modal -->
+                <div class="pt-2">
+                  <div class="flex items-center gap-2">
+                    <button
+                      type="button"
+                      @click="handleTestConnection(false)"
+                      :disabled="testLoading"
+                      class="inline-flex items-center gap-1.5 px-4 py-2 bg-sky-50 dark:bg-sky-500/10 hover:bg-sky-100 dark:hover:bg-sky-500/20 text-sky-700 dark:text-sky-400 font-bold rounded-xl border border-sky-200 dark:border-sky-500/30 transition-all text-xs"
+                    >
+                      <span class="material-icons select-none text-sm animate-spin" v-if="testLoading">sync</span>
+                      <span class="material-icons select-none text-sm" v-else>offline_bolt</span>
+                      {{ testLoading ? 'ກຳລັງກວດສອບ...' : 'ກວດສອບການເຊື່ອມຕໍ່ (Test Connection)' }}
+                    </button>
+                  </div>
+
+                  <!-- Test result alert inside Modal -->
+                  <div v-if="testResult" class="mt-3 p-3.5 rounded-xl border text-xs"
+                    :class="testResult.success 
+                      ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-250/20 text-emerald-800 dark:text-emerald-300' 
+                      : 'bg-rose-50 dark:bg-rose-500/10 border-rose-250/20 text-rose-800 dark:text-rose-300'">
+                    <div class="flex items-start gap-2">
+                      <span class="material-icons select-none text-base mt-0.5" :class="testResult.success ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
+                        {{ testResult.success ? 'check_circle' : 'error' }}
+                      </span>
+                      <div>
+                        <strong class="block mb-0.5">{{ testResult.success ? 'ການເຊື່ອມຕໍ່ຖືກຕ້ອງ!' : 'ການເຊື່ອມຕໍ່ຫຼົ້ມເຫຼວ' }}</strong>
+                        <p class="leading-relaxed">{{ testResult.message }}</p>
+                        <p v-if="testResult.pageName" class="mt-1 font-bold">ຊື່ເພຈ: {{ testResult.pageName }}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Messages -->
+                <p v-if="editFormError" class="rounded-xl border border-rose-200 bg-rose-50 dark:border-rose-500/20 dark:bg-rose-500/10 p-3 text-xs font-bold text-rose-700 dark:text-rose-350">
+                  {{ editFormError }}
+                </p>
+                <p v-if="editFormSuccess" class="rounded-xl border border-emerald-200 bg-emerald-50 dark:border-emerald-500/20 dark:bg-emerald-500/10 p-3 text-xs font-bold text-emerald-700 dark:text-emerald-350">
+                  ອັບເດດຂໍ້ມູນການເຊື່ອມຕໍ່ສຳເລັດແລ້ວ!
+                </p>
+              </div>
+
+              <div class="modal-footer border-t border-slate-200 dark:border-slate-800 px-6 py-4 flex items-center justify-end gap-3 bg-slate-50 dark:bg-slate-900/50">
+                <button 
+                  type="button" 
+                  class="px-4 py-2 rounded-xl text-sm font-bold bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 transition-all" 
+                  @click="showEditForm = false"
+                >
+                  ຍົກເລີກ
+                </button>
+                <button 
+                  type="submit" 
+                  :disabled="editFormLoading"
+                  class="px-4 py-2 rounded-xl text-sm font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-all disabled:opacity-50 shadow-md"
+                >
+                  {{ editFormLoading ? 'ກຳລັງບັນທຶກ...' : 'ບັນທຶກການແກ້ໄຂ' }}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
 
     <!-- Unified Device Layout Selector (Mobile / Tablet Tabs) -->
     <div v-if="!isDesktop" class="flex border border-slate-200 dark:border-slate-800 gap-1 p-1 bg-white/60 dark:bg-slate-900/40 backdrop-blur rounded-2xl shadow-sm">
@@ -457,7 +807,7 @@ onMounted(() => {
           </div>
 
           <!-- Simulator Tab Content -->
-          <div class="flex-grow p-4 overflow-y-auto flex flex-col space-y-4" v-if="activeSimulatorTab === 'chat'">
+          <div ref="chatContainer" class="flex-grow p-4 overflow-y-auto flex flex-col space-y-4" v-if="activeSimulatorTab === 'chat'">
             <!-- Helper Instruction if chat is empty -->
             <div v-if="messages.length === 0" class="text-center my-auto p-6 space-y-3">
               <span class="material-icons select-none text-slate-300 dark:text-slate-600 text-5xl">auto_awesome</span>
@@ -525,5 +875,9 @@ onMounted(() => {
         </div>
       </div>
     </div>
+  </div>
+
+  <div v-else class="rounded-2xl border border-dashed border-slate-200 bg-white p-8 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
+    ບໍ່ພົບຂໍ້ມູນເພຈ
   </div>
 </template>

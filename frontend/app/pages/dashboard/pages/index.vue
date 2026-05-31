@@ -1,17 +1,16 @@
 <script setup lang="ts">
 import {
-  Bot, CheckCircle2, ExternalLink, Facebook, Plus, Search, Settings, SlidersHorizontal, Trash2, X,
+  Bot, ExternalLink, Facebook, Plus, Search, Settings, SlidersHorizontal, Trash2, X,
 } from 'lucide-vue-next';
 import { useAuthStore } from '~/stores/auth';
-import { useMockStore } from '~/stores/mockData';
 
 definePageMeta({
   middleware: 'auth',
   layout: 'default',
 });
 
+const route = useRoute();
 const authStore = useAuthStore();
-const mockStore = useMockStore();
 const apiUrl = useApiUrl();
 const dialog = useDialog();
 
@@ -19,7 +18,9 @@ const dialog = useDialog();
 const pagesList = ref<any[]>([]);
 const loading = ref(false);
 const error = ref('');
-const isMockMode = ref(false);
+
+// ─── OAuth success/error notification ──────────────────────
+const oauthNotification = ref<{ type: 'success' | 'error'; message: string } | null>(null);
 
 // ─── Search & filter ───────────────────────────────────────
 const searchQuery = ref('');
@@ -33,9 +34,67 @@ const fbPageAccessToken = ref('');
 const formError = ref('');
 const formLoading = ref(false);
 
+const testLoading = ref(false);
+const testResult = ref<{ success: boolean; message: string; pageName?: string } | null>(null);
+
+// ─── OAuth loading state ───────────────────────────────────
+const oauthLoading = ref(false);
+
 const headers = computed(() => ({
   Authorization: `Bearer ${authStore.token}`,
 }));
+
+// ─── Handle OAuth callback query params ────────────────────
+onMounted(() => {
+  fetchPages();
+
+  const success = route.query.oauth_success;
+  const error = route.query.oauth_error;
+  const connected = route.query.connected;
+
+  if (success === 'true') {
+    oauthNotification.value = {
+      type: 'success',
+      message: connected
+        ? `ເຊື່ອມຕໍ່ Facebook Page ສຳເລັດ! (${connected} ເພຈ)`
+        : 'ເຊື່ອມຕໍ່ Facebook Page ສຳເລັດ!',
+    };
+    // Clean URL params
+    window.history.replaceState({}, '', '/dashboard/pages');
+  } else if (error) {
+    const errorMessages: Record<string, string> = {
+      state_mismatch: 'ຄວາມປອດໄພລົ້ມເຫຼວ (state mismatch). ກະລຸນາລອງໃໝ່.',
+      no_code: 'ບໍ່ໄດ້ຮັບລະຫັດຢືນຢັນຈາກ Facebook. ກະລຸນາລອງໃໝ່.',
+      token_exchange_failed: 'ການແລກປ່ຽນ Token ລົ້ມເຫຼວ. ກະລຸນາລອງໃໝ່.',
+      long_token_failed: 'ການຂະຫຍາຍອາຍຸ Token ລົ້ມເຫຼວ. ກະລຸນາລອງໃໝ່.',
+      pages_fetch_failed: 'ບໍ່ສາມາດດຶງຂໍ້ມູນເພຈຈາກ Facebook ໄດ້. ກະລຸນາລອງໃໝ່.',
+      unexpected: 'ເກີດຂໍ້ຜິດພາດທີ່ບໍ່ຄາດຄິດ. ກະລຸນາລອງໃໝ່.',
+    };
+    oauthNotification.value = {
+      type: 'error',
+      message: errorMessages[error as string] || `ເກີດຂໍ້ຜິດພາດ: ${error}`,
+    };
+    window.history.replaceState({}, '', '/dashboard/pages');
+  }
+});
+
+// ─── Handle OAuth Login ────────────────────────────────────
+async function handleFacebookOAuth() {
+  oauthLoading.value = true;
+  try {
+    const res = await $fetch<{ redirectUrl: string }>(`${apiUrl}/api/auth/facebook/login`, {
+      headers: headers.value,
+    });
+    // Redirect to Facebook Login dialog
+    window.location.href = res.redirectUrl;
+  } catch (err: any) {
+    oauthLoading.value = false;
+    oauthNotification.value = {
+      type: 'error',
+      message: err.data?.error || 'ບໍ່ສາມາດເລີ່ມຕົ້ນ Facebook Login ໄດ້. ກະລຸນາກວດສອບການຕັ້ງຄ່າ.',
+    };
+  }
+}
 
 // ─── Filtered pages ────────────────────────────────────────
 const filteredPages = computed(() => {
@@ -66,21 +125,14 @@ async function fetchPages() {
   loading.value = true;
   error.value = '';
 
-  if (authStore.token?.startsWith('mock')) {
-    isMockMode.value = true;
-    pagesList.value = mockStore.getPages();
-    loading.value = false;
-    return;
-  }
-
   try {
     const data = await $fetch<any[]>(`${apiUrl}/api/pages`, {
       headers: headers.value,
     });
     pagesList.value = data;
-  } catch {
-    isMockMode.value = true;
-    pagesList.value = mockStore.getPages();
+  } catch (err: any) {
+    console.error('Error fetching pages:', err);
+    error.value = err.data?.error || 'ບໍ່ສາມາດໂຫຼດຂໍ້ມູນເພຈ໌ໄດ້';
   } finally {
     loading.value = false;
   }
@@ -93,7 +145,38 @@ function resetForm() {
   fbPageAccessToken.value = '';
   formError.value = '';
   formLoading.value = false;
+  testResult.value = null;
+  testLoading.value = false;
 }
+
+async function handleTestConnection() {
+  testLoading.value = true;
+  testResult.value = null;
+  try {
+    const res = await $fetch<any>(`${apiUrl}/api/pages/test-connection`, {
+      method: 'POST',
+      headers: headers.value,
+      body: {
+        fbPageId: fbPageId.value.trim(),
+        fbPageAccessToken: fbPageAccessToken.value.trim()
+      },
+    });
+
+    testResult.value = {
+      success: true,
+      message: res.message || 'ການເຊື່ອມຕໍ່ສຳເລັດແລ້ວ!',
+      pageName: res.pageName,
+    };
+  } catch (err: any) {
+    testResult.value = {
+      success: false,
+      message: err.data?.error || 'ບໍ່ສາມາດເຊື່ອມຕໍ່ກັບ Facebook Page ໄດ້.',
+    };
+  } finally {
+    testLoading.value = false;
+  }
+}
+
 
 async function handleAddPage() {
   formError.value = '';
@@ -104,15 +187,6 @@ async function handleAddPage() {
   }
 
   formLoading.value = true;
-
-  if (isMockMode.value) {
-    mockStore.addPage(fbPageId.value.trim(), fbPageName.value.trim(), fbPageAccessToken.value.trim());
-    pagesList.value = mockStore.getPages();
-    showAddForm.value = false;
-    resetForm();
-    formLoading.value = false;
-    return;
-  }
 
   try {
     await $fetch(`${apiUrl}/api/pages`, {
@@ -136,12 +210,6 @@ async function handleAddPage() {
 
 // ─── Toggle active ─────────────────────────────────────────
 function togglePageActive(page: any) {
-  if (isMockMode.value) {
-    mockStore.updatePage(page.id, { isActive: !page.isActive });
-    pagesList.value = mockStore.getPages();
-    return;
-  }
-
   $fetch(`${apiUrl}/api/pages/${page.id}`, {
     method: 'PUT',
     headers: headers.value,
@@ -167,11 +235,6 @@ async function handleDeletePage(pageId: string) {
 
   if (!confirmed) return;
 
-  if (isMockMode.value) {
-    mockStore.deletePage(pageId);
-    pagesList.value = mockStore.getPages();
-    return;
-  }
 
   try {
     await $fetch(`${apiUrl}/api/pages/${pageId}`, {
@@ -184,10 +247,6 @@ async function handleDeletePage(pageId: string) {
   }
 }
 
-// ─── Lifecycle ─────────────────────────────────────────────
-onMounted(() => {
-  fetchPages();
-});
 </script>
 
 <template>
@@ -206,18 +265,7 @@ onMounted(() => {
       </button>
     </header>
 
-    <!-- ═══════════════ MOCK MODE BANNER ═══════════════ -->
-    <section
-      v-if="isMockMode"
-      class="mb-6 flex flex-col gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300 sm:flex-row sm:items-center sm:justify-between"
-    >
-      <span>
-        <strong>Mock mode:</strong> backend ຍັງບໍ່ຕອບ, ກຳລັງໃຊ້ຂໍ້ມູນຈຳລອງ.
-      </span>
-      <button class="app-btn-secondary min-h-9 py-1.5 text-amber-800 dark:text-amber-300" type="button" @click="isMockMode = false; fetchPages();">
-        ລອງເຊື່ອມຕໍ່ຄືນ
-      </button>
-    </section>
+
 
     <!-- ═══════════════ ERROR BANNER ═══════════════ -->
     <section
@@ -225,6 +273,25 @@ onMounted(() => {
       class="mb-6 rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300"
     >
       {{ error }}
+    </section>
+
+    <!-- ═══════════════ OAUTH NOTIFICATION BANNER ═══════════════ -->
+    <section
+      v-if="oauthNotification"
+      class="mb-6 flex items-center justify-between rounded-lg border p-4 text-sm font-semibold"
+      :class="oauthNotification.type === 'success'
+        ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300'
+        : 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300'"
+    >
+      <span class="flex items-center gap-2">
+        <span class="material-icons select-none text-base" :class="oauthNotification.type === 'success' ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
+          {{ oauthNotification.type === 'success' ? 'check_circle' : 'error' }}
+        </span>
+        {{ oauthNotification.message }}
+      </span>
+      <button type="button" @click="oauthNotification = null" class="text-current opacity-60 hover:opacity-100">
+        <span class="material-icons select-none text-base">close</span>
+      </button>
     </section>
 
     <!-- ═══════════════ SEARCH & FILTER BAR ═══════════════ -->
@@ -279,9 +346,29 @@ onMounted(() => {
     </div>
 
     <!-- ═══════════════ LOADING ═══════════════ -->
-    <section v-if="loading" class="app-surface rounded-xl p-12 text-center text-sm text-slate-500">
-      <Bot class="mx-auto mb-3 h-8 w-8 animate-pulse text-slate-300 dark:text-slate-600" />
-      ກຳລັງໂຫຼດຂໍ້ມູນເພຈ...
+    <section v-if="loading" class="space-y-6">
+      <div class="space-y-3">
+        <AppSkeletonBlock class="h-4 w-28" />
+        <AppSkeletonBlock class="h-8 w-80 max-w-full" />
+        <AppSkeletonBlock class="h-4 w-[32rem] max-w-full" />
+      </div>
+
+      <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <AppSkeletonBlock v-for="n in 4" :key="n" class="h-28 rounded-2xl" />
+      </div>
+
+      <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <div class="flex items-center justify-between gap-4">
+          <div class="space-y-2">
+            <AppSkeletonBlock class="h-5 w-44" />
+            <AppSkeletonBlock class="h-3 w-28" />
+          </div>
+          <AppSkeletonBlock class="h-10 w-32 rounded-xl" />
+        </div>
+        <div class="mt-5 grid gap-3 md:grid-cols-2">
+          <AppSkeletonBlock v-for="n in 4" :key="n" class="h-24 rounded-xl" />
+        </div>
+      </div>
     </section>
 
     <!-- ═══════════════ EMPTY STATE ═══════════════ -->
@@ -296,10 +383,22 @@ onMounted(() => {
       <p class="mx-auto mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
         {{ searchQuery ? 'ລອງປ່ຽນຄຳຄົ້ນຫາ ຫຼື ລ້າງຕົວກອງ.' : 'ເຊື່ອມຕໍ່ Facebook Page ເພື່ອເລີ່ມຝຶກ AI bot ແລະ ຕິດຕາມ CRM.' }}
       </p>
-      <button v-if="!searchQuery" class="app-btn-primary mt-6" type="button" @click="showAddForm = true">
-        <Plus class="h-4 w-4" />
-        ເຊື່ອມຕໍ່ເພຈ
-      </button>
+      <div v-if="!searchQuery" class="mt-6 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+        <button class="app-btn-primary" type="button" @click="showAddForm = true">
+          <Plus class="h-4 w-4" />
+          ເຊື່ອມຕໍ່ເພຈ (ປ້ອນຂໍ້ມູນເອງ)
+        </button>
+        <button
+          type="button"
+          @click="handleFacebookOAuth"
+          :disabled="oauthLoading"
+          class="inline-flex items-center gap-2 rounded-xl bg-[#1877F2] px-5 py-2.5 text-sm font-bold text-white shadow-md transition-all hover:bg-[#166FE5] disabled:opacity-60"
+        >
+          <span v-if="oauthLoading" class="material-icons select-none text-base animate-spin">sync</span>
+          <Facebook v-else class="h-5 w-5" />
+          {{ oauthLoading ? 'ກຳລັງເຊື່ອມຕໍ່...' : 'ເຊື່ອມຕໍ່ຜ່ານ Facebook' }}
+        </button>
+      </div>
     </section>
 
     <!-- ═══════════════ PAGES GRID ═══════════════ -->
@@ -339,7 +438,7 @@ onMounted(() => {
           </div>
 
           <!-- Status badge -->
-          <div class="mt-4 flex items-center gap-2">
+          <div class="mt-4 flex items-center gap-2 flex-wrap">
             <span
               class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium"
               :class="page.isActive
@@ -351,6 +450,15 @@ onMounted(() => {
                 :class="page.isActive ? 'bg-emerald-500' : 'bg-slate-400'"
               ></span>
               {{ page.isActive ? 'ເປີດໃຊ້ງານ' : 'ປິດໃຊ້ງານ' }}
+            </span>
+            <!-- OAuth badge -->
+            <span
+              v-if="page.fbUserAccessToken"
+              class="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-400"
+              title="ເຊື່ອມຕໍ່ຜ່ານ Facebook Login (OAuth) — Token ຕໍ່ອາຍຸອັດຕະໂນມັດ"
+            >
+              <Facebook class="h-3 w-3" />
+              OAuth
             </span>
             <span class="text-xs text-slate-400">
               ສ້າງ: {{ new Date(page.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) }}
@@ -384,6 +492,37 @@ onMounted(() => {
 
     <!-- ═══════════════ ADD PAGE MODAL ═══════════════ -->
     <AppModal v-model="showAddForm" title="ເຊື່ອມຕໍ່ Facebook Page" description="ປ້ອນຂໍ້ມູນເພຈ Facebook ຂອງທ່ານເພື່ອເຊື່ອມຕໍ່ກັບ AI Chatbot." size="lg" @close="resetForm">
+      <!-- OAuth Quick Connect Button -->
+      <div class="mb-4 rounded-xl border-2 border-dashed border-indigo-300 bg-indigo-50/50 p-5 text-center dark:border-indigo-500/30 dark:bg-indigo-500/5">
+        <p class="mb-3 text-sm font-bold text-indigo-800 dark:text-indigo-300">
+          <span class="material-icons select-none align-middle text-base">link</span>
+          ເຊື່ອມຕໍ່ອັດຕະໂນມັດດ້ວຍ Facebook Login
+        </p>
+        <p class="mb-4 text-xs text-indigo-600 dark:text-indigo-400">
+          ກົດປຸ່ມລຸ່ມນີ້ເພື່ອເຊື່ອມຕໍ່ຜ່ານ Facebook — ລະບົບຈະດຶງຂໍ້ມູນເພຈ ແລະ Token ໃຫ້ອັດຕະໂນມັດ.
+        </p>
+        <button
+          type="button"
+          @click="handleFacebookOAuth"
+          :disabled="oauthLoading"
+          class="inline-flex items-center gap-2 rounded-xl bg-[#1877F2] px-6 py-3 text-sm font-bold text-white shadow-md transition-all hover:bg-[#166FE5] disabled:opacity-60"
+        >
+          <span v-if="oauthLoading" class="material-icons select-none text-base animate-spin">sync</span>
+          <Facebook v-else class="h-5 w-5" />
+          {{ oauthLoading ? 'ກຳລັງເຊື່ອມຕໍ່...' : 'ເຊື່ອມຕໍ່ຜ່ານ Facebook' }}
+        </button>
+      </div>
+
+      <!-- Divider -->
+      <div class="relative mb-4">
+        <div class="absolute inset-0 flex items-center">
+          <div class="w-full border-t border-slate-200 dark:border-slate-700"></div>
+        </div>
+        <div class="relative flex justify-center text-xs uppercase">
+          <span class="bg-white px-3 text-slate-400 dark:bg-slate-900 dark:text-slate-500">ຫຼື ປ້ອນຂໍ້ມູນດ້ວຍຕົນເອງ</span>
+        </div>
+      </div>
+
       <form class="flex flex-col gap-4" @submit.prevent="handleAddPage">
         <!-- Page Name -->
         <div>
@@ -479,6 +618,37 @@ onMounted(() => {
                 💡 ຄຳແນະນຳ: Token ມີອາຍຸ 60 ວັນ ຖ້າໃຊ້ "Exchange Token".
                 ເມື່ອ Token ໝົດອາຍຸ, ທ່ານຈະຕ້ອງສ້າງໃໝ່ ແລະ ອັບເດດໃນລະບົບ.
               </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Test Connection inside Modal -->
+        <div class="pt-2">
+          <button
+            type="button"
+            @click="handleTestConnection"
+            :disabled="testLoading || !fbPageId.trim()"
+            class="inline-flex items-center gap-1.5 px-4 py-2 bg-sky-50 dark:bg-sky-500/10 hover:bg-sky-100 dark:hover:bg-sky-500/20 text-sky-700 dark:text-sky-400 font-bold rounded-xl border border-sky-200 dark:border-sky-500/30 transition-all text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <span class="material-icons select-none text-sm animate-spin" v-if="testLoading">sync</span>
+            <span class="material-icons select-none text-sm" v-else>offline_bolt</span>
+            {{ testLoading ? 'ກຳລັງກວດສອບ...' : 'ກວດສອບການເຊື່ອມຕໍ່ (Test Connection)' }}
+          </button>
+
+          <!-- Test result alert inside Modal -->
+          <div v-if="testResult" class="mt-3 p-3.5 rounded-xl border text-xs"
+            :class="testResult.success 
+              ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-255/20 text-emerald-800 dark:text-emerald-300' 
+              : 'bg-rose-50 dark:bg-rose-500/10 border-rose-255/20 text-rose-800 dark:text-rose-300'">
+            <div class="flex items-start gap-2">
+              <span class="material-icons select-none text-base mt-0.5" :class="testResult.success ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
+                {{ testResult.success ? 'check_circle' : 'error' }}
+              </span>
+              <div>
+                <strong class="block mb-0.5">{{ testResult.success ? 'ການເຊື່ອມຕໍ່ຖືກຕ້ອງ!' : 'ການເຊື່ອມຕໍ່ຫຼົ້ມເຫຼວ' }}</strong>
+                <p class="leading-relaxed">{{ testResult.message }}</p>
+                <p v-if="testResult.pageName" class="mt-1 font-bold">ຊື່ເພຈ: {{ testResult.pageName }}</p>
+              </div>
             </div>
           </div>
         </div>

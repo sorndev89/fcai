@@ -1,4 +1,4 @@
-import { escapeHtml } from 'file://D:/Developer/NuxtJS/Facebook_Chat_Ai/frontend/node_modules/@vue/shared/dist/shared.cjs.prod.js';
+import { escapeHtml } from 'file:///Users/macpro/Developer/NuxtJS/fcai/frontend/node_modules/@vue/shared/dist/shared.cjs.prod.js';
 
 const _messages = {
 	"appName": "Nuxt",

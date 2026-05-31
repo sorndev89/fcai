@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { useAuthStore } from '~/stores/auth';
-import { useMockStore } from '~/stores/mockData';
 
 definePageMeta({
   middleware: 'auth',
@@ -9,12 +8,25 @@ definePageMeta({
 
 const route = useRoute();
 const authStore = useAuthStore();
-const mockStore = useMockStore();
 const apiUrl = useApiUrl();
 
 const customerId = route.params.id as string;
 const customer = ref<any>(null);
 const chatLogs = ref<any[]>([]);
+const chatContainer = ref<HTMLElement | null>(null);
+const loading = ref(true);
+
+function scrollToBottom() {
+  nextTick(() => {
+    if (chatContainer.value) {
+      chatContainer.value.scrollTop = chatContainer.value.scrollHeight;
+    }
+  });
+}
+
+watch(chatLogs, () => {
+  scrollToBottom();
+}, { deep: true });
 
 // Profile Edit form states
 const phone = ref('');
@@ -25,7 +37,6 @@ const notesForAi = ref('');
 const editLoading = ref(false);
 const editSuccess = ref(false);
 const editError = ref('');
-const isMockMode = ref(false);
 
 // Viewport layout logic (unified device detection logic)
 const { isMobile, isTablet, isDesktop } = useDevice();
@@ -36,20 +47,14 @@ const showSummaryModal = ref(false);
 const analyzing = ref(false);
 const summaryResult = ref<any>(null);
 
+const headers = computed(() => ({
+  Authorization: `Bearer ${authStore.token}`,
+}));
+
 async function handleAnalyzeOrder() {
   analyzing.value = true;
   showSummaryModal.value = true;
   summaryResult.value = null;
-
-  if (isMockMode.value || authStore.token?.startsWith('mock')) {
-    // Simulate AI loading delay
-    setTimeout(() => {
-      const res = mockStore.simulateAiOrderSummary(customerId);
-      summaryResult.value = res;
-      analyzing.value = false;
-    }, 1500);
-    return;
-  }
 
   try {
     const res = await $fetch<any>(`${apiUrl}/api/customers/${customerId}/order-summary`, {
@@ -58,71 +63,67 @@ async function handleAnalyzeOrder() {
     });
     summaryResult.value = { success: true, hasPurchase: true, summary: res.summary };
   } catch (err: any) {
-    console.error('AI Summary failed, falling back to mock summary');
-    const res = mockStore.simulateAiOrderSummary(customerId);
-    summaryResult.value = res;
+    console.error('AI Summary failed:', err);
+    summaryResult.value = { success: false, hasPurchase: false, summary: 'ບໍ່ສາມາດວິເຄາະຂໍ້ມູນດ້ວຍ AI ໄດ້: ' + (err.data?.error || err.message) };
   } finally {
     analyzing.value = false;
   }
 }
 
-function applyAiSummaryToCrm() {
+async function applyAiSummaryToCrm() {
   if (summaryResult.value?.summary) {
     const s = summaryResult.value.summary;
     if (s.phone) phone.value = s.phone;
     if (s.shippingAddress) shippingAddress.value = s.shippingAddress;
     showSummaryModal.value = false;
+    
+    // Auto-save the updated values to the database
+    await handleSaveProfile();
   }
 }
 
-const headers = computed(() => ({
-  Authorization: `Bearer ${authStore.token}`,
-}));
-
 async function loadCustomerDetails() {
-  if (isMockMode.value || authStore.token?.startsWith('mock')) {
-    isMockMode.value = true;
-    const cust = mockStore.getCustomers().find((c) => c.id === customerId);
-    if (cust) {
-      customer.value = cust;
-      phone.value = cust.phoneNumber || '';
-      email.value = cust.email || '';
-      shippingAddress.value = cust.address || '';
-      notesForAi.value = cust.notes || '';
-      
-      // Load local mockup chat history
-      chatLogs.value = mockStore.getChatLogs(cust.pageId, cust.fbPsid);
-    }
-    return;
-  }
-
   try {
     const data = await $fetch<any>(`${apiUrl}/api/customers/${customerId}`, {
       headers: headers.value,
     });
     customer.value = data;
-    phone.value = data.phone || '';
+    phone.value = data.phoneNumber || '';
     email.value = data.email || '';
-    shippingAddress.value = data.shippingAddress || '';
-    notesForAi.value = data.notesForAi || '';
+    shippingAddress.value = data.address || '';
+    notesForAi.value = data.notes || '';
 
     // Load actual DB chat history
-    const logs = await $fetch<any[]>(`${apiUrl}/api/customers/${customerId}/history`, {
+    const logs = await $fetch<any[]>(`${apiUrl}/api/customers/${customerId}/chats`, {
       headers: headers.value,
     });
-    chatLogs.value = logs;
-  } catch (err) {
-    console.warn('ບໍ່ສາມາດດຶງຂໍ້ມູນ CRM ຈາກ Backend. ເປີດໃຊ້ງານໂໝດ Mockup Data.');
-    isMockMode.value = true;
-    const cust = mockStore.getCustomers().find((c) => c.id === customerId);
-    if (cust) {
-      customer.value = cust;
-      phone.value = cust.phoneNumber || '';
-      email.value = cust.email || '';
-      shippingAddress.value = cust.address || '';
-      notesForAi.value = cust.notes || '';
-      chatLogs.value = mockStore.getChatLogs(cust.pageId, cust.fbPsid);
+    
+    // Flat map: each chatLog record contains a prompt (messageIn) and a reply (messageOut)
+    const formatted: any[] = [];
+    for (const log of logs) {
+      if (log.messageIn) {
+        formatted.push({
+          id: `${log.id}-in`,
+          senderId: data.fbPsid,
+          messageText: log.messageIn,
+          createdAt: log.createdAt,
+        });
+      }
+      if (log.messageOut) {
+        formatted.push({
+          id: `${log.id}-out`,
+          senderId: 'bot',
+          messageText: log.messageOut,
+          createdAt: log.createdAt,
+        });
+      }
     }
+    chatLogs.value = formatted;
+  } catch (err: any) {
+    console.error('Error loading customer details:', err);
+    editError.value = 'ບໍ່ສາມາດດຶງຂໍ້ມູນ CRM ຈາກ Backend ໄດ້';
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -131,30 +132,15 @@ async function handleSaveProfile() {
   editSuccess.value = false;
   editError.value = '';
 
-  if (isMockMode.value) {
-    mockStore.updateCustomer(customerId, {
-      phoneNumber: phone.value,
-      email: email.value,
-      address: shippingAddress.value,
-      notes: notesForAi.value,
-    });
-    editSuccess.value = true;
-    editLoading.value = false;
-    setTimeout(() => {
-      editSuccess.value = false;
-    }, 3000);
-    return;
-  }
-
   try {
     await $fetch(`${apiUrl}/api/customers/${customerId}`, {
       method: 'PUT',
       headers: headers.value,
       body: {
-        phone: phone.value,
+        phoneNumber: phone.value,
         email: email.value,
-        shippingAddress: shippingAddress.value,
-        notesForAi: notesForAi.value,
+        address: shippingAddress.value,
+        notes: notesForAi.value,
       },
     });
     editSuccess.value = true;
@@ -186,7 +172,39 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="space-y-6 transition-colors duration-200" v-if="customer">
+  <div v-if="loading" class="space-y-6 transition-colors duration-200">
+    <div class="flex items-center justify-between">
+      <AppSkeletonBlock class="h-4 w-48" />
+      <AppSkeletonBlock class="h-9 w-40 rounded-xl" />
+    </div>
+
+    <div class="bg-white dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm dark:shadow-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-4 transition-colors">
+      <div class="flex items-center gap-4">
+        <AppSkeletonBlock class="h-14 w-14 rounded-full" />
+        <div class="space-y-2">
+          <AppSkeletonBlock class="h-6 w-56" />
+          <AppSkeletonBlock class="h-3 w-40" />
+        </div>
+      </div>
+      <AppSkeletonBlock class="h-10 w-60 rounded-xl" />
+    </div>
+
+    <div class="grid gap-6 lg:grid-cols-12">
+      <div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/40 lg:col-span-7 space-y-4">
+        <AppSkeletonBlock class="h-6 w-64" />
+        <div class="grid gap-4 md:grid-cols-2">
+          <AppSkeletonBlock v-for="n in 4" :key="n" class="h-16 rounded-xl" />
+        </div>
+        <AppSkeletonBlock class="h-44 rounded-2xl" />
+      </div>
+      <div class="space-y-4 lg:col-span-5">
+        <AppSkeletonBlock class="h-64 rounded-2xl" />
+        <AppSkeletonBlock class="h-96 rounded-2xl" />
+      </div>
+    </div>
+  </div>
+
+  <div class="space-y-6 transition-colors duration-200" v-else-if="customer">
     <!-- Breadcrumbs -->
     <div class="flex items-center justify-between">
       <NuxtLink
@@ -197,9 +215,7 @@ onMounted(() => {
         ກັບຄືນຫາໜ້າກຳນົດຄ່າບັອດ
       </NuxtLink>
 
-      <span v-if="isMockMode" class="px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 text-xs font-semibold border border-indigo-200 dark:border-indigo-500/20">
-        ໂໝດຈຳລອງ (Mockup CRM)
-      </span>
+
     </div>
 
     <!-- Customer Card Header -->
@@ -369,7 +385,7 @@ onMounted(() => {
         </div>
 
         <!-- Chat Stream -->
-        <div class="flex-grow p-4 overflow-y-auto flex flex-col space-y-4">
+        <div ref="chatContainer" class="flex-grow p-4 overflow-y-auto flex flex-col space-y-4">
           <div v-if="chatLogs.length === 0" class="text-center my-auto p-6 space-y-2 text-slate-500">
             <span class="material-icons select-none text-slate-300 dark:text-slate-600 text-4xl">chat</span>
             <p class="text-xs">ບໍ່ທັນມີປະຫວັດການສົນທະນາເທື່ອ</p>
@@ -453,6 +469,9 @@ onMounted(() => {
       </template>
     </AppModal>
   </div>
-</template>
 
+  <div v-else class="rounded-2xl border border-dashed border-slate-200 bg-white p-8 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
+    ບໍ່ພົບຂໍ້ມູນລູກຄ້າ
+  </div>
+</template>
 
