@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { Menu, X, ArrowRight, Sparkles } from 'lucide-vue-next';
 
+const route = useRoute();
+const router = useRouter();
 const isOpen = ref(false);
 
 const navItems = [
@@ -11,6 +13,13 @@ const navItems = [
 ];
 
 function scrollToSection(href: string) {
+  if (route.path !== '/') {
+    // If not on home page, go to home page with hash
+    router.push({ path: '/', hash: href });
+    closeMenu();
+    return;
+  }
+
   const id = href.startsWith('#') ? href.slice(1) : href;
   const target = document.getElementById(id);
 
@@ -50,7 +59,7 @@ function closeMenu() {
           <a
             v-for="item in navItems"
             :key="item.href"
-            :href="item.href"
+            :href="route.path === '/' ? item.href : '/' + item.href"
             class="rounded-full px-4 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
             @click.prevent="scrollToSection(item.href)"
           >
@@ -95,7 +104,7 @@ function closeMenu() {
             <a
               v-for="item in navItems"
               :key="item.href"
-              :href="item.href"
+              :href="route.path === '/' ? item.href : '/' + item.href"
               class="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition-all hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
               @click.prevent="scrollToSection(item.href)"
             >

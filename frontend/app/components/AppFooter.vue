@@ -126,7 +126,11 @@ withDefaults(defineProps<{
         <p class="text-[10px] text-slate-400 dark:text-slate-500">
           &copy; {{ new Date().getFullYear() }} FCAI. ພັດທະນາດ້ວຍ <Heart class="inline h-3 w-3 text-rose-500 fill-rose-500 animate-pulse" /> ໃນປະເທດລາວ.
         </p>
-        <div class="flex gap-3 text-[10px] text-slate-400 dark:text-slate-500">
+        <div class="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400 dark:text-slate-500">
+          <NuxtLink to="/privacy-policy" class="hover:text-sky-500 dark:hover:text-sky-400 transition-colors">ນະໂຍບາຍຄວາມເປັນສ່ວນຕົວ</NuxtLink>
+          <span>•</span>
+          <NuxtLink to="/terms-of-service" class="hover:text-sky-500 dark:hover:text-sky-400 transition-colors">ຂໍ້ກຳນົດ ແລະ ເງື່ອນໄຂ</NuxtLink>
+          <span>•</span>
           <span>ເວີຊັນ 1.2.0 (AI Enhanced)</span>
         </div>
       </div>

@@ -1,0 +1,49 @@
+{
+  "hash": "616a61ee",
+  "configHash": "23385def",
+  "lockfileHash": "7a0a587d",
+  "browserHash": "73c3fc16",
+  "optimized": {
+    "@vue/devtools-core": {
+      "src": "../../../node_modules/@vue/devtools-core/dist/index.js",
+      "file": "@vue_devtools-core.js",
+      "fileHash": "5f68d6fd",
+      "needsInterop": false
+    },
+    "@vue/devtools-kit": {
+      "src": "../../../node_modules/@vue/devtools-kit/dist/index.js",
+      "file": "@vue_devtools-kit.js",
+      "fileHash": "e9f102f8",
+      "needsInterop": false
+    },
+    "lucide-vue-next": {
+      "src": "../../../node_modules/lucide-vue-next/dist/esm/lucide-vue-next.js",
+      "file": "lucide-vue-next.js",
+      "fileHash": "8bcc5686",
+      "needsInterop": false
+    },
+    "errx": {
+      "src": "../../../node_modules/errx/dist/index.js",
+      "file": "errx.js",
+      "fileHash": "568953df",
+      "needsInterop": false
+    },
+    "vue3-apexcharts": {
+      "src": "../../../node_modules/vue3-apexcharts/dist/vue3-apexcharts.js",
+      "file": "vue3-apexcharts.js",
+      "fileHash": "e9a5f1ac",
+      "needsInterop": false
+    }
+  },
+  "chunks": {
+    "chunk-BDFOYZUG": {
+      "file": "chunk-BDFOYZUG.js"
+    },
+    "apexcharts.ssr.esm-fe46cd2d-7JLKF7KQ": {
+      "file": "apexcharts__ssr__esm-fe46cd2d-7JLKF7KQ.js"
+    },
+    "chunk-PZ5AY32C": {
+      "file": "chunk-PZ5AY32C.js"
+    }
+  }
+}
