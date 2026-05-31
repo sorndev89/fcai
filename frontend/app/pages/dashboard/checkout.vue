@@ -42,6 +42,11 @@ const slipPreview = ref<string>('');
 const slipBase64 = ref<string>('');
 const selectedTopupAmount = computed(() => Number(selectedTokenBundle.value?.price || 0));
 const selectedTopupTokens = computed(() => Number(selectedTokenBundle.value?.tokenAmount || 0));
+const selectedBankQrUrl = computed(() => {
+  const qrUrl = selectedBank.value?.qrCodeUrl;
+  if (!qrUrl) return '';
+  return qrUrl.startsWith('http') ? qrUrl : `${apiUrl}${qrUrl}`;
+});
 
 // ─── Fetch Data ─────────────────────────────────────────
 async function fetchDetails() {
@@ -68,7 +73,7 @@ async function fetchDetails() {
 
     bankAccounts.value = Array.isArray(banksRes) ? banksRes : [];
     if (bankAccounts.value.length > 0) {
-      selectedBank.value = bankAccounts.value[0];
+      selectedBank.value = bankAccounts.value.find((bank: any) => bank.qrCodeUrl) || bankAccounts.value[0];
     }
 
     tokenBundles.value = Array.isArray(bundlesRes) ? bundlesRes : [];
@@ -183,7 +188,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="mx-auto w-full max-w-3xl space-y-5 pb-10 lg:max-w-4xl">
+  <div class="w-full space-y-5 pb-10">
     <!-- Back Header -->
     <div class="flex items-center gap-3">
       <button
@@ -246,9 +251,9 @@ onMounted(() => {
         </div>
       </div>
 
-      <div v-else class="grid gap-5 md:grid-cols-5">
+      <div v-else class="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,0.95fr)]">
         <!-- Left Section: Package Info & Bank Accounts (3 cols) -->
-        <div class="space-y-6 md:col-span-3">
+        <div class="space-y-6">
           <!-- Package Summary Card -->
           <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 space-y-4">
             <h2 class="text-sm font-bold uppercase tracking-wider text-slate-400">
@@ -308,9 +313,9 @@ onMounted(() => {
                 class="mt-4 p-4 rounded-xl border border-slate-100 bg-slate-50 dark:border-slate-800 dark:bg-slate-950 flex flex-col sm:flex-row items-center gap-6"
               >
                 <!-- QR Code Display -->
-                <div v-if="selectedBank.qrCodeUrl" class="w-36 h-36 bg-white p-2 rounded-xl shadow-inner shrink-0 border border-slate-200/50">
+                <div v-if="selectedBankQrUrl" class="w-36 h-36 bg-white p-2 rounded-xl shadow-inner shrink-0 border border-slate-200/50">
                   <img
-                    :src="selectedBank.qrCodeUrl"
+                    :src="selectedBankQrUrl"
                     alt="Bank Transfer QR Code"
                     class="w-full h-full object-contain"
                   />
@@ -340,7 +345,7 @@ onMounted(() => {
         </div>
 
         <!-- Right Section: Slip Upload & Confirm (2 cols) -->
-        <div class="space-y-6 md:col-span-2">
+        <div class="space-y-6">
           <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 space-y-4">
             <h2 class="text-sm font-bold uppercase tracking-wider text-slate-400">ແນບໃບບິນໂອນເງິນ</h2>
 
